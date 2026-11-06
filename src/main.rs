@@ -13,6 +13,7 @@ mod dashboard;
 mod exchanges;
 mod kraken;
 mod markets;
+mod news;
 mod orchestrator;
 mod orders;
 mod paper;

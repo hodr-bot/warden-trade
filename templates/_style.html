@@ -506,6 +506,20 @@ pre {
   letter-spacing: -0.03em;
 }
 
+/* PnL coloring: green when up, red when down (dashboard deltas). */
+.card-metric.up {
+  color: var(--success);
+}
+.card-metric.down {
+  color: var(--danger-text);
+}
+.table td.up {
+  color: var(--success);
+}
+.table td.down {
+  color: var(--danger-text);
+}
+
 .card-metric-delta {
   font-size: var(--fs-sm);
   font-weight: 500;
@@ -1022,3 +1036,4 @@ textarea.input {
   }
 }
 </style>
+

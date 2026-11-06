@@ -32,18 +32,95 @@ fn decide(agent: &str, action: &str, symbol: &str, confidence: f64, reason: Stri
     }
 }
 
+/// Market-wide context shaping one cycle:
+/// - `sentiment` in `[-1.0, 1.0]` (RSS mood merged with Fear & Greed,
+///   see [`crate::news`]). Neutral `0.0` disables the news gate.
+/// - `funding`: Binance perpetual funding rate if known (e.g. `0.0001`);
+///   crowded longs (high positive) veto buys, crowded shorts veto sells.
+///   `None` disables the funding gate.
+#[derive(Debug, Clone, Copy)]
+pub struct MarketContext {
+    pub sentiment: f32,
+    pub funding: Option<f64>,
+}
+
+impl MarketContext {
+    /// Neutral context: price signals decide alone.
+    pub fn neutral() -> Self {
+        Self { sentiment: 0.0, funding: None }
+    }
+}
+
+/// News veto threshold: at or beyond ±0.5 the headlines overrule price signals.
+pub const SENTIMENT_VETO: f32 = 0.5;
+
+/// Funding veto threshold: at or beyond ±0.05 % per 8 h the perpetual
+/// crowd is overcrowded and the cycle steps aside (contrarian gate).
+pub const FUNDING_VETO: f64 = 0.0005;
+
 /// Target paper notional per autonomous order, in quote currency.
 pub const TARGET_NOTIONAL: f64 = 100.0;
 
-/// Run one deterministic orchestration cycle for `symbol` on `closes`
-/// (oldest first, may be empty).
+/// Order quantity for `price` under the volatility sizing of `closes`.
 ///
-/// Empty history degrades every agent to `hold` (same as the legacy
-/// stub cycle). With prices, technical/strategy vote real signals,
-/// quant sizes a [`TARGET_NOTIONAL`] order, risk approves or vetoes
-/// against conservative defaults, and execution carries the validated
-/// intent the scheduler places. No network, no secrets, no I/O.
+/// Shared by the quant agent (display) and the scheduler (placement)
+/// so both agree on size. Returns `0.0` when there is nothing valid to size.
+pub fn sized_qty(closes: &[f64], price: f64) -> f64 {
+    if price.is_finite() && price > 0.0 {
+        TARGET_NOTIONAL * size_factor(closes) / price
+    } else {
+        0.0
+    }
+}
+
+/// Realized-volatility sizing: annualization uses 5-minute bars
+/// (12/h × 24h × 365d = 105 120 bars/year).
+fn size_factor(closes: &[f64]) -> f64 {
+    const WIN: usize = 20;
+    if closes.len() < WIN + 1 {
+        return 1.0;
+    }
+    let window = &closes[closes.len() - WIN - 1..];
+    let rets: Vec<f64> = window
+        .windows(2)
+        .filter(|w| w[0] > 0.0 && w[1] > 0.0)
+        .map(|w| (w[1] / w[0]).ln())
+        .collect();
+    if rets.len() < 2 {
+        return 1.0;
+    }
+    let mean = rets.iter().sum::<f64>() / rets.len() as f64;
+    let var = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / rets.len() as f64;
+    let vol_ann = var.sqrt() * (105_120.0f64).sqrt();
+    if !vol_ann.is_finite() || vol_ann <= 0.0 {
+        return 1.0;
+    }
+    (0.5 / vol_ann).clamp(0.25, 1.0)
+}
+
+/// Run one deterministic orchestration cycle for `symbol` on `closes`
+/// (oldest first, may be empty) under neutral market context.
+///
+/// Thin wrapper over [`run_cycle_with_context`]: price signals decide alone.
 pub fn run_cycle_with_prices(symbol: &str, closes: &[f64]) -> Vec<AgentDecision> {
+    run_cycle_with_context(symbol, closes, MarketContext::neutral())
+}
+
+/// Run one deterministic orchestration cycle for `symbol` on `closes`
+/// (oldest first, may be empty) under `ctx`.
+///
+/// Empty history degrades every agent to hold (except the reporting
+/// roles). With prices, technical votes SMA, strategy aggregates the
+/// three votes (soft-vetoed by news beyond ±[`SENTIMENT_VETO`]), quant
+/// sizes a [`TARGET_NOTIONAL`] order scaled by realized volatility,
+/// risk approves or vetoes against conservative defaults, and execution
+/// carries the validated intent the scheduler places. No network, no
+/// secrets, no I/O.
+pub fn run_cycle_with_context(
+    symbol: &str,
+    closes: &[f64],
+    ctx: MarketContext,
+) -> Vec<AgentDecision> {
     let last = closes.last().copied();
     let mut out = Vec::with_capacity(8);
 
@@ -73,22 +150,52 @@ pub fn run_cycle_with_prices(symbol: &str, closes: &[f64]) -> Vec<AgentDecision>
     let mr = mean_reversion_signal(closes);
     let mom = momentum_signal(closes);
     let votes = [sma.clone(), mr.clone(), mom.clone()];
-    let final_signal = aggregate(&votes);
-    let voters: Vec<f64> = votes
-        .iter()
-        .filter(|v| v.signal == final_signal && final_signal != Signal::Hold)
-        .map(|v| v.confidence)
-        .collect();
-    let voter_conf = if voters.is_empty() {
+    let price_signal = aggregate(&votes);
+    // News soft-veto: headlines beyond ±SENTIMENT_VETO overrule the
+    // price vote in their direction (bearish news blocks buys, bullish
+    // news blocks sells). Funding soft-veto: an overcrowded perpetual
+    // crowd (beyond ±FUNDING_VETO) blocks trades riding with it. Each
+    // veto is logged in the reason.
+    let (mut final_signal, mut vetoed) = match price_signal {
+        Signal::Buy if ctx.sentiment <= -SENTIMENT_VETO => {
+            (Signal::Hold, format!("news veto (sentiment {:.2})", ctx.sentiment))
+        }
+        Signal::Sell if ctx.sentiment >= SENTIMENT_VETO => {
+            (Signal::Hold, format!("news veto (sentiment {:.2})", ctx.sentiment))
+        }
+        s => (s, String::new()),
+    };
+    if final_signal == Signal::Buy {
+        if let Some(f) = ctx.funding {
+            if f >= FUNDING_VETO {
+                vetoed = format!("funding veto (rate {f:.4} overcrowded long)");
+                final_signal = Signal::Hold;
+            }
+        }
+    }
+    if final_signal == Signal::Sell {
+        if let Some(f) = ctx.funding {
+            if f <= -FUNDING_VETO {
+                vetoed = format!("funding veto (rate {f:.4} overcrowded short)");
+                final_signal = Signal::Hold;
+            }
+        }
+    }
+    let voter_conf: f64 = if final_signal == Signal::Hold && price_signal != Signal::Hold {
         0.0
     } else {
-        voters.iter().sum::<f64>() / voters.len() as f64
+        let voters: Vec<f64> = votes
+            .iter()
+            .filter(|v| v.signal == final_signal && final_signal != Signal::Hold)
+            .map(|v| v.confidence)
+            .collect();
+        if voters.is_empty() {
+            0.0
+        } else {
+            voters.iter().sum::<f64>() / voters.len() as f64
+        }
     };
-    out.push(decide(
-        "strategy",
-        final_signal.action(),
-        symbol,
-        if final_signal == Signal::Hold { 0.0 } else { voter_conf },
+    let strategy_reason = if vetoed.is_empty() {
         format!(
             "{}:{} {}:{} {}:{} => {}",
             sma.strategy,
@@ -98,18 +205,44 @@ pub fn run_cycle_with_prices(symbol: &str, closes: &[f64]) -> Vec<AgentDecision>
             mom.strategy,
             mom.signal.action(),
             final_signal.action()
-        ),
+        )
+    } else {
+        format!(
+            "{}:{} {}:{} {}:{} => price {} but {vetoed}",
+            sma.strategy,
+            sma.signal.action(),
+            mr.strategy,
+            mr.signal.action(),
+            mom.strategy,
+            mom.signal.action(),
+            price_signal.action(),
+        )
+    };
+    out.push(decide(
+        "strategy",
+        final_signal.action(),
+        symbol,
+        voter_conf,
+        strategy_reason,
     ));
 
-    // Quant: size a TARGET_NOTIONAL order at the last price.
-    let qty = last.map(|p| if p > 0.0 { TARGET_NOTIONAL / p } else { 0.0 });
+    // Quant: size a TARGET_NOTIONAL order at the last price, scaled
+    // down when realized volatility is hot (factor in (0.25, 1.0]).
+    let factor = size_factor(closes);
+    let qty = last.map(|p| {
+        if p > 0.0 {
+            TARGET_NOTIONAL * factor / p
+        } else {
+            0.0
+        }
+    });
     match (last, qty) {
         (Some(p), Some(q)) if q > 0.0 && p.is_finite() => out.push(decide(
             "quant",
             "size",
             symbol,
             0.5,
-            format!("qty {q:.6} for ${TARGET_NOTIONAL:.0} @ {p:.2}"),
+            format!("qty {q:.6} for ${TARGET_NOTIONAL:.0}x{factor:.2} @ {p:.2}"),
         )),
         _ => out.push(decide("quant", "hold", symbol, 0.0, "no price to size".to_string())),
     }
@@ -208,8 +341,9 @@ pub async fn record_decisions(
 /// authenticated tenant and persist the 8 decisions.
 ///
 /// Requires `Authorization: Bearer *** via [`Tenant`]. DB failures become
-/// `503`. When the Coinbase feed is unreachable, degrades to the
-/// priceless all-hold cycle instead of failing.
+/// `503`. Context is live (RSS/Fear&Greed sentiment + BTC funding);
+/// when feeds are unreachable, degrades to the priceless all-hold
+/// cycle instead of failing.
 pub async fn run_cycle_handler(
     tenant: Tenant,
     State(state): State<AppState>,
@@ -219,24 +353,35 @@ pub async fn run_cycle_handler(
         .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid tenant".to_string()))?;
     let closes = live_closes().await.unwrap_or_default();
-    let decisions = run_cycle_with_prices("BTC-USD", &closes);
+    let rss = crate::news::fetch_sentiment().await;
+    let fg = crate::news::fetch_fear_greed().await;
+    let funding = crate::news::fetch_funding("BTC").await;
+    let ctx = MarketContext { sentiment: crate::news::combine_sentiment(rss, fg), funding };
+    let decisions = run_cycle_with_context("BTC-USD", &closes, ctx);
     record_decisions(&state.pool, tenant_id, &decisions)
         .await
         .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?;
     Ok(Json(decisions))
 }
 
-/// Fetch recent BTC-USD 5-minute closes from Coinbase, oldest first.
+/// Fetch recent 5-minute closes for `symbol` from Coinbase, oldest first.
 ///
 /// Pure feed read for the cycle; any failure degrades to an empty
 /// series (the cycle then holds). Never panics, never logs secrets.
-pub async fn live_closes() -> Result<Vec<f64>, String> {
+pub async fn live_closes_for(symbol: &str) -> Result<Vec<f64>, String> {
     let client = crate::coinbase::CoinbaseClient::new();
     let candles = client
-        .fetch_candles("BTC-USD", 300)
+        .fetch_candles(symbol, 300)
         .await
         .map_err(|e| format!("feed: {e}"))?;
     Ok(candles.iter().map(|c| c.close).collect())
+}
+
+/// Fetch recent BTC-USD 5-minute closes from Coinbase, oldest first.
+///
+/// Convenience wrapper over [`live_closes_for`] for the manual cycle endpoint.
+pub async fn live_closes() -> Result<Vec<f64>, String> {
+    live_closes_for("BTC-USD").await
 }
 
 /// Axum handler returning this cycle's decisions for `BTC-USD` as JSON.
@@ -325,6 +470,77 @@ mod tests {
         let by_agent = |id: &str| decisions.iter().find(|d| d.agent == id).unwrap();
         assert_eq!(by_agent("strategy").action, "hold");
         assert_eq!(by_agent("execution").action, "hold");
+    }
+
+    #[test]
+    fn bearish_news_vetoes_buy_bullish_news_vetoes_sell() {
+        let mut up = vec![100.0; 19];
+        up.push(112.0); // price says buy
+        let bearish = MarketContext { sentiment: -0.8, funding: None };
+        let d = run_cycle_with_context("BTC-USD", &up, bearish);
+        let by_agent = |id: &str| d.iter().find(|a| a.agent == id).unwrap();
+        assert_eq!(by_agent("strategy").action, "hold");
+        assert!(by_agent("strategy").reason.contains("news veto"));
+        assert_eq!(by_agent("execution").action, "hold");
+
+        let mut down = vec![112.0; 19];
+        down.push(100.0); // price says sell
+        let bullish = MarketContext { sentiment: 0.8, funding: None };
+        let d = run_cycle_with_context("BTC-USD", &down, bullish);
+        let by_agent = |id: &str| d.iter().find(|a| a.agent == id).unwrap();
+        assert_eq!(by_agent("strategy").action, "hold");
+        assert!(by_agent("strategy").reason.contains("news veto"));
+    }
+
+    #[test]
+    fn mild_sentiment_does_not_veto() {
+        let mut up = vec![100.0; 19];
+        up.push(112.0);
+        let mild = MarketContext { sentiment: -0.2, funding: None };
+        let d = run_cycle_with_context("BTC-USD", &up, mild);
+        assert_eq!(d.iter().find(|a| a.agent == "strategy").unwrap().action, "buy");
+    }
+
+    #[test]
+    fn crowded_funding_vetoes_with_the_crowd() {
+        let mut up = vec![100.0; 19];
+        up.push(112.0); // price says buy
+        let crowded_long = MarketContext { sentiment: 0.0, funding: Some(0.0009) };
+        let d = run_cycle_with_context("BTC-USD", &up, crowded_long);
+        let by_agent = |id: &str| d.iter().find(|a| a.agent == id).unwrap();
+        assert_eq!(by_agent("strategy").action, "hold");
+        assert!(by_agent("strategy").reason.contains("funding veto"));
+
+        let mut down = vec![112.0; 19];
+        down.push(100.0); // price says sell
+        let crowded_short = MarketContext { sentiment: 0.0, funding: Some(-0.0009) };
+        let d = run_cycle_with_context("BTC-USD", &down, crowded_short);
+        let by_agent = |id: &str| d.iter().find(|a| a.agent == id).unwrap();
+        assert_eq!(by_agent("strategy").action, "hold");
+        assert!(by_agent("strategy").reason.contains("funding veto"));
+    }
+
+    #[test]
+    fn normal_funding_does_not_veto() {
+        let mut up = vec![100.0; 19];
+        up.push(112.0);
+        let calm = MarketContext { sentiment: 0.0, funding: Some(0.00009) };
+        let d = run_cycle_with_context("BTC-USD", &up, calm);
+        assert_eq!(d.iter().find(|a| a.agent == "strategy").unwrap().action, "buy");
+    }
+
+    #[test]
+    fn size_factor_shrinks_when_volatile() {
+        // Flat market: full size.
+        assert!((size_factor(&vec![100.0; 25]) - 1.0).abs() < 1e-9);
+        // Wild swings: minimum size.
+        let mut wild = Vec::new();
+        for i in 0..30 {
+            wild.push(if i % 2 == 0 { 100.0 } else { 120.0 });
+        }
+        assert!(size_factor(&wild) < 0.5, "wild market must shrink size");
+        // Too short: full size.
+        assert_eq!(size_factor(&[100.0, 101.0]), 1.0);
     }
 
     #[tokio::test]

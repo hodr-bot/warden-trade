@@ -1,8 +1,10 @@
 //! Autonomous paper-trading scheduler (paper only, never real funds).
 //!
 //! Every [`interval`](scheduler_interval_secs) the scheduler runs one
-//! [`orchestrator`](crate::orchestrator) cycle on live Coinbase prices
-//! for the solo-admin tenant and, when strategy and risk agree on a
+//! [`orchestrator`](crate::orchestrator) cycle per configured symbol
+//! ([`scheduler_symbols`], default BTC/ETH/SOL vs USD) on live Coinbase
+//! prices, enriched with market context (news sentiment, Fear & Greed,
+//! per-asset funding rates), and, when strategy and risk agree on a
 //! `buy`/`sell` intent, places exactly one paper order through the same
 //! risk-gated [`place_paper_order`](crate::orders::place_paper_order)
 //! path as the manual API.
@@ -14,7 +16,10 @@
 //! `SCHEDULER_ENABLED=false` disables the loop; the kill switch in
 //! `risk_limits` stays the emergency brake (checked on every order).
 
-use crate::orchestrator::{live_closes, record_decisions, run_cycle_with_prices, TARGET_NOTIONAL};
+use crate::news::{combine_sentiment, fetch_fear_greed, fetch_funding, fetch_sentiment};
+use crate::orchestrator::{
+    live_closes_for, record_decisions, run_cycle_with_context, sized_qty, MarketContext,
+};
 use crate::state::AppState;
 
 /// Scheduler tick interval, read from `SCHEDULER_INTERVAL_SECS` (default 300s).
@@ -31,6 +36,23 @@ pub fn scheduler_enabled() -> bool {
     std::env::var("SCHEDULER_ENABLED")
         .map(|v| v != "false" && v != "0")
         .unwrap_or(true)
+}
+
+/// Symbols traded autonomously, from `SCHEDULER_SYMBOLS`
+/// (comma-separated, default BTC/ETH/SOL vs USD).
+pub fn scheduler_symbols() -> Vec<String> {
+    let raw = std::env::var("SCHEDULER_SYMBOLS")
+        .unwrap_or_else(|_| "BTC-USD,ETH-USD,SOL-USD".to_string());
+    let symbols: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if symbols.is_empty() {
+        vec!["BTC-USD".to_string()]
+    } else {
+        symbols
+    }
 }
 
 /// Oldest tenant id (solo-admin first). The scheduler trades for the
@@ -63,45 +85,69 @@ async fn last_side(pool: &sqlx::PgPool, tenant_id: uuid::Uuid, symbol: &str) -> 
 /// Returns a short human-readable summary for the logs. Never panics;
 /// feed or DB failures degrade to hold/skip, never to a trade.
 pub async fn tick(state: &AppState) -> String {
-    const SYMBOL: &str = "BTC-USD";
     let tenant_id = match solo_tenant(&state.pool).await {
         Some(id) => id,
         None => return "tick skipped: no tenant".to_string(),
     };
-    let closes = live_closes().await.unwrap_or_default();
-    let decisions = run_cycle_with_prices(SYMBOL, &closes);
+    // Market-wide context, fetched once per tick and shared by every symbol.
+    let rss = fetch_sentiment().await;
+    let fg = fetch_fear_greed().await;
+    let sentiment = combine_sentiment(rss, fg);
+    let mut summaries = Vec::new();
+    for symbol in scheduler_symbols() {
+        summaries.push(tick_symbol(state, tenant_id, &symbol, sentiment).await);
+    }
+    summaries.join(" | ")
+}
+
+/// One symbol of a tick: cycle on live closes + funding, then at most one
+/// paper order. `sentiment` is the tick-wide RSS/Fear&Greed blend.
+async fn tick_symbol(
+    state: &AppState,
+    tenant_id: uuid::Uuid,
+    symbol: &str,
+    sentiment: f32,
+) -> String {
+    let base = symbol.split('-').next().unwrap_or(symbol);
+    let closes = live_closes_for(symbol).await.unwrap_or_default();
+    let funding = fetch_funding(base).await;
+    let ctx = MarketContext { sentiment, funding };
+    let decisions = run_cycle_with_context(symbol, &closes, ctx);
     if let Err(e) = record_decisions(&state.pool, tenant_id, &decisions).await {
-        return format!("tick degraded: decisions not recorded: {e}");
+        return format!("{symbol} degraded: decisions not recorded: {e}");
     }
     let action_of = |id: &str| decisions.iter().find(|d| d.agent == id).map(|d| d.action.as_str());
     let (strategy, risk, execution) =
         (action_of("strategy"), action_of("risk"), action_of("execution"));
     if strategy != Some("buy") && strategy != Some("sell") {
-        return format!("tick hold: strategy={}", strategy.unwrap_or("?"));
+        return format!("{symbol} hold: strategy={}", strategy.unwrap_or("?"));
     }
     if risk != Some("approve") || execution == Some("hold") {
         return format!(
-            "tick blocked: strategy={} risk={}",
+            "{symbol} blocked: strategy={} risk={}",
             strategy.unwrap_or("?"),
             risk.unwrap_or("?")
         );
     }
     let side = strategy.unwrap_or("hold");
-    if last_side(&state.pool, tenant_id, SYMBOL).await.as_deref() == Some(side) {
-        return format!("tick skipped: already positioned {side}");
+    if last_side(&state.pool, tenant_id, symbol).await.as_deref() == Some(side) {
+        return format!("{symbol} skipped: already positioned {side}");
     }
     let price = match closes.last().copied() {
         Some(p) if p.is_finite() && p > 0.0 => p,
-        _ => return "tick skipped: no price to trade".to_string(),
+        _ => return format!("{symbol} skipped: no price to trade"),
     };
-    let qty = TARGET_NOTIONAL / price;
+    let qty = sized_qty(&closes, price);
+    if qty <= 0.0 {
+        return format!("{symbol} skipped: no size to trade");
+    }
     let slot = chrono::Utc::now().timestamp() / scheduler_interval_secs() as i64;
-    let key = format!("sched-{side}-{SYMBOL}-{slot}");
+    let key = format!("sched-{side}-{symbol}-{slot}");
     match crate::orders::place_paper_order(
         &state.pool,
         tenant_id,
         "coinbase",
-        SYMBOL,
+        symbol,
         side,
         qty,
         price,
@@ -109,8 +155,8 @@ pub async fn tick(state: &AppState) -> String {
     )
     .await
     {
-        Ok(order) => format!("tick placed {side} {} @ {:.2} (id {})", order.qty, order.price, order.id),
-        Err((status, msg)) => format!("tick order rejected ({status}): {msg}"),
+        Ok(order) => format!("{symbol} placed {side} {} @ {:.2} (id {})", order.qty, order.price, order.id),
+        Err((status, msg)) => format!("{symbol} order rejected ({status}): {msg}"),
     }
 }
 
@@ -119,7 +165,7 @@ pub async fn tick(state: &AppState) -> String {
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         let every = scheduler_interval_secs();
-        tracing::info!("scheduler on: BTC-USD every {every}s (paper only)");
+        tracing::info!("scheduler on: {} every {every}s (paper only)", scheduler_symbols().join(","));
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(every)).await;
             let summary = tick(&state).await;

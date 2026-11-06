@@ -45,18 +45,18 @@
         </div>
         <div class="card card-accent">
           <div class="card-eyebrow">Portfolio value</div>
-          <div class="card-metric">{{ portfolio_value }}</div>
-          <div class="card-footer"><span>Mark-to-market</span></div>
+          <div class="card-metric {{ portfolio_class }}">{{ portfolio_value }}</div>
+          <div class="card-footer"><span>Mark-to-market · {{ portfolio_sub }}</span></div>
         </div>
         <div class="card">
           <div class="card-eyebrow">Realized PnL</div>
-          <div class="card-metric">{{ pnl_realized }}</div>
-          <div class="card-footer"><span>Closed positions</span></div>
+          <div class="card-metric {{ realized_class }}">{{ pnl_realized }}</div>
+          <div class="card-footer"><span>Closed positions · {{ realized_sub }}</span></div>
         </div>
         <div class="card">
           <div class="card-eyebrow">Unrealized PnL</div>
-          <div class="card-metric">{{ pnl_unrealized }}</div>
-          <div class="card-footer"><span>Open positions</span></div>
+          <div class="card-metric {{ unrealized_class }}">{{ pnl_unrealized }}</div>
+          <div class="card-footer"><span>Open positions · {{ unrealized_sub }}</span></div>
         </div>
         <div class="card">
           <div class="card-eyebrow">Trades</div>
@@ -84,9 +84,9 @@
           </thead>
           <tbody>
             <tr><td>Capital total</td><td class="num">{{ capital_total }}</td></tr>
-            <tr><td>Portfolio value</td><td class="num">{{ portfolio_value }}</td></tr>
-            <tr><td>Realized PnL</td><td class="num">{{ pnl_realized }}</td></tr>
-            <tr><td>Unrealized PnL</td><td class="num">{{ pnl_unrealized }}</td></tr>
+            <tr><td>Portfolio value</td><td class="num {{ portfolio_class }}">{{ portfolio_value }} <span class="muted">{{ portfolio_sub }}</span></td></tr>
+            <tr><td>Realized PnL</td><td class="num {{ realized_class }}">{{ pnl_realized }} <span class="muted">{{ realized_sub }}</span></td></tr>
+            <tr><td>Unrealized PnL</td><td class="num {{ unrealized_class }}">{{ pnl_unrealized }} <span class="muted">{{ unrealized_sub }}</span></td></tr>
             <tr><td>Trades count</td><td class="num">{{ trades_count }}</td></tr>
             <tr><td>Fees paid</td><td class="num">{{ fees_paid }}</td></tr>
             <tr><td>Drawdown</td><td class="num">{{ drawdown }}</td></tr>

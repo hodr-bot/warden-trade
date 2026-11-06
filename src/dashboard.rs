@@ -20,8 +20,14 @@ use crate::state::AppState;
 pub struct DashboardTemplate {
     pub capital_total: String,
     pub portfolio_value: String,
+    pub portfolio_class: &'static str,
+    pub portfolio_sub: String,
     pub pnl_realized: String,
+    pub realized_class: &'static str,
+    pub realized_sub: String,
     pub pnl_unrealized: String,
+    pub unrealized_class: &'static str,
+    pub unrealized_sub: String,
     pub trades_count: String,
     pub fees_paid: String,
     pub drawdown: String,
@@ -37,6 +43,56 @@ fn fmt_money(v: f64) -> String {
     } else {
         format!("{:+.2}", v)
     }
+}
+
+/// USD amount with explicit `$` sign: `$+8.93`, `$-3.10`, `$0.00`.
+fn fmt_usd(v: f64) -> String {
+    if v == 0.0 {
+        "$0.00".to_string()
+    } else {
+        format!("${:+.2}", v)
+    }
+}
+
+/// EUR equivalent in French format (`≈ +8,21 €`), or empty when the
+/// rate is unknown. Pure.
+fn fmt_eur(usd: f64, rate: Option<f64>) -> String {
+    match rate {
+        Some(r) if r.is_finite() && r > 0.0 => {
+            let eur = usd * r;
+            let sign = if eur > 0.0 { "+" } else if eur < 0.0 { "-" } else { "" };
+            format!("≈ {}{} €", sign, format!("{:.2}", eur.abs()).replace('.', ","))
+        }
+        _ => String::new(),
+    }
+}
+
+/// `up` (green) / `down` (red) / `` (neutral) for delta styling.
+fn delta_class(v: f64) -> &'static str {
+    if v > 0.0 {
+        "up"
+    } else if v < 0.0 {
+        "down"
+    } else {
+        ""
+    }
+}
+
+/// Free keyless USD→EUR rate (`open.er-api.com`). `None` on any
+/// failure — the dashboard then simply hides EUR equivalents.
+async fn fetch_usd_eur() -> Option<f64> {
+    let body: serde_json::Value = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?
+        .get("https://open.er-api.com/v6/latest/USD")
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    body.get("rates")?.get("EUR")?.as_f64()
 }
 
 /// FIFO PnL over `(side, qty, price)` fills, oldest first.
@@ -167,15 +223,23 @@ pub async fn dashboard_handler(State(state): State<AppState>) -> axum::response:
             .collect()
     })
     .unwrap_or_default();
+    let eur = fetch_usd_eur().await;
+    let total = realized + unrealized;
     let template = DashboardTemplate {
         capital_total: if open_value == 0.0 {
             "0".to_string()
         } else {
             format!("{open_value:.2}")
         },
-        portfolio_value: fmt_money(realized + unrealized),
-        pnl_realized: fmt_money(realized),
-        pnl_unrealized: fmt_money(unrealized),
+        portfolio_value: fmt_usd(total),
+        portfolio_class: delta_class(total),
+        portfolio_sub: fmt_eur(total, eur),
+        pnl_realized: fmt_usd(realized),
+        realized_class: delta_class(realized),
+        realized_sub: fmt_eur(realized, eur),
+        pnl_unrealized: fmt_usd(unrealized),
+        unrealized_class: delta_class(unrealized),
+        unrealized_sub: fmt_eur(unrealized, eur),
         trades_count: fills.len().to_string(),
         fees_paid: "0".to_string(),
         drawdown: fmt_money(realized.min(0.0)),
@@ -227,12 +291,31 @@ mod tests {
     }
 
     #[test]
+    fn formatting_is_explicit() {
+        assert_eq!(fmt_usd(8.93), "$+8.93");
+        assert_eq!(fmt_usd(-3.1), "$-3.10");
+        assert_eq!(fmt_usd(0.0), "$0.00");
+        assert_eq!(fmt_eur(8.93, Some(0.89048)), "≈ +7,95 €");
+        assert_eq!(fmt_eur(-8.93, Some(0.89048)), "≈ -7,95 €");
+        assert_eq!(fmt_eur(8.93, None), "");
+        assert_eq!(delta_class(1.0), "up");
+        assert_eq!(delta_class(-1.0), "down");
+        assert_eq!(delta_class(0.0), "");
+    }
+
+    #[test]
     fn dashboard_template_renders_warden() {
         let template = DashboardTemplate {
             capital_total: "10000".to_string(),
-            portfolio_value: "10000".to_string(),
-            pnl_realized: "0".to_string(),
-            pnl_unrealized: "0".to_string(),
+            portfolio_value: "$+8.93".to_string(),
+            portfolio_class: "up",
+            portfolio_sub: "≈ +7,95 €".to_string(),
+            pnl_realized: "$+1.24".to_string(),
+            realized_class: "up",
+            realized_sub: "≈ +1,10 €".to_string(),
+            pnl_unrealized: "$+7.69".to_string(),
+            unrealized_class: "up",
+            unrealized_sub: "≈ +6,85 €".to_string(),
             trades_count: "0".to_string(),
             fees_paid: "0".to_string(),
             drawdown: "0%".to_string(),
