@@ -9,11 +9,16 @@
 //! {"error":[],"result":{"XXBTZUSD":{"a":["1","2"],"b":["1","2"],"c":["64234.1","0.5"]}}}
 //! ```
 //!
-//! No network calls in unit tests. No secrets. Read-only public feed only.
+//! No external network calls in unit tests (one test hits the
+//! unreachable loopback `http://127.0.0.1:9`, which fails locally
+//! without internet). No secrets. Read-only public feed only.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use reqwest::Client;
+
+use crate::exchanges::ExchangeError;
 
 /// Minimal Kraken client for the public ticker feed.
 #[derive(Debug, Clone)]
@@ -46,6 +51,77 @@ impl KrakenClient {
             self.base_url.trim_end_matches('/'),
             pair
         )
+    }
+
+    /// Fetch the last price for a pair like `"XBTUSD"` via `GET ticker_url`.
+    ///
+    /// Read-only public feed (no auth, no secrets). Applies a 10 second
+    /// timeout and maps failures onto [`ExchangeError`]: timeouts to
+    /// `Timeout`, connection failures to `Network`, 429 to `RateLimited`,
+    /// 401/403 to `Auth`, 404 to `NotFound`, other bad statuses to
+    /// `BadResponse`. The success body is parsed with
+    /// [`Self::parse_ticker_response`].
+    pub async fn fetch_last_price(&self, pair: &str) -> Result<f64, ExchangeError> {
+        let url = self.ticker_url(pair);
+        let request = self.http.get(&url).timeout(Duration::from_secs(10));
+        let resp = tokio::time::timeout(Duration::from_secs(10), request.send())
+            .await
+            .map_err(|_| {
+                ExchangeError::Timeout(format!("kraken ticker request timed out: {url}"))
+            })?
+            .map_err(|e| {
+                if e.is_timeout() {
+                    ExchangeError::Timeout(format!("kraken ticker request timed out: {e}"))
+                } else if e.is_connect() {
+                    ExchangeError::Network(format!("kraken ticker connection failed: {e}"))
+                } else {
+                    ExchangeError::Network(format!("kraken ticker request failed: {e}"))
+                }
+            })?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after_secs = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok());
+            return Err(ExchangeError::RateLimited {
+                detail: format!("kraken ticker rate limited: HTTP {status} for {url}"),
+                retry_after_secs,
+            });
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED
+            || status == reqwest::StatusCode::FORBIDDEN
+        {
+            return Err(ExchangeError::Auth(format!(
+                "kraken ticker auth error: HTTP {status} for {url}"
+            )));
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(ExchangeError::NotFound(format!(
+                "kraken ticker not found: HTTP {status} for {url}"
+            )));
+        }
+        if !status.is_success() {
+            return Err(ExchangeError::BadResponse(format!(
+                "kraken ticker bad status: HTTP {status} for {url}"
+            )));
+        }
+
+        let body = tokio::time::timeout(Duration::from_secs(10), resp.text())
+            .await
+            .map_err(|_| {
+                ExchangeError::Timeout(format!("kraken ticker body timed out: {url}"))
+            })?
+            .map_err(|e| {
+                if e.is_timeout() {
+                    ExchangeError::Timeout(format!("kraken ticker body timed out: {e}"))
+                } else {
+                    ExchangeError::Network(format!("kraken ticker body read failed: {e}"))
+                }
+            })?;
+        Self::parse_ticker_response(&body).map_err(ExchangeError::BadResponse)
     }
 
     /// Parse a Kraken ticker JSON payload into an `f64` last price.
@@ -129,5 +205,16 @@ mod tests {
         assert!(KrakenClient::parse_ticker_response("not json").is_err());
         assert!(KrakenClient::parse_ticker_response(r#"{"error":["EQuery:Unknown asset pair"],"result":{}}"#).is_err());
         assert!(KrakenClient::parse_ticker_response(r#"{"error":[],"result":{}}"#).is_err());
+    }
+
+    #[tokio::test]
+    async fn fetch_last_price_unreachable_base_returns_exchange_error() {
+        // Unroutable loopback port: connection refused locally, no external network.
+        let client = KrakenClient::with_base_url("http://127.0.0.1:9");
+        let err = client
+            .fetch_last_price("XBTUSD")
+            .await
+            .expect_err("unreachable base_url must fail");
+        let _: &ExchangeError = &err;
     }
 }
