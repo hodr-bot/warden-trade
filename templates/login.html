@@ -3,70 +3,20 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Warden Trade — Login</title>
+  <title>Warden Trade — Sign in</title>
   {% include "_style.html" %}
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
 </head>
 <body class="page">
-  <nav class="nav" aria-label="Primary">
-    <div class="nav-inner">
-      <a class="nav-brand" href="/"><span class="nav-brand-mark" aria-hidden="true"></span>Warden Trade</a>
-      <ul class="nav-links">
-        <li><a href="/">Dashboard</a></li>
-        <li><a href="/markets">Markets</a></li>
-        <li><a href="/orders">Orders</a></li>
-        <li><a href="/login" aria-current="page">Login</a></li>
-      </ul>
-    </div>
-  </nav>
-
   <main class="main container" id="login">
-    <div class="section-head">
-      <div>
-        <p><span class="badge badge-warning">Paper trading only — no real funds</span></p>
-        <h1>Warden Trade</h1>
-        <p>Autonomous multi-exchange crypto trading, supervised by AI agents under independent safety limits. Sign in to operate the solo-admin console.</p>
+    <section class="section" aria-label="Sign in" style="max-width: 400px; margin-inline: auto; padding-top: var(--space-7);">
+      <div style="display: grid; justify-items: center; text-align: center; gap: var(--space-2); margin-bottom: var(--space-5);">
+        <span class="nav-brand-mark" aria-hidden="true" style="width: 28px; height: 28px;"></span>
+        <div class="muted" style="font-weight: 600; color: var(--text-strong);">Warden Trade</div>
+        <h1>Welcome back</h1>
+        <p class="muted" style="margin: 0;">Sign in to your console.</p>
       </div>
-    </div>
-
-    <section class="section" aria-label="What you get">
-      <div class="cards">
-        <div class="card card-accent">
-          <div class="card-eyebrow">Live market data</div>
-          <div class="card-metric">BTC-USD</div>
-          <div class="card-footer">Real-time prices from Coinbase and Kraken, timestamped on every quote.</div>
-        </div>
-        <div class="card">
-          <div class="card-eyebrow">Agents</div>
-          <div class="card-text"><strong>8 evaluator agents</strong> — market, technical, strategy, quant, risk, execution, portfolio, performance. Every decision is recorded and reconcilable.</div>
-        </div>
-        <div class="card">
-          <div class="card-eyebrow">Safety</div>
-          <div class="card-text"><strong>Independent limits.</strong> Agents can never change their own limits. API keys stay withdrawal-disabled, encrypted, and out of logs.</div>
-        </div>
-        <div class="card">
-          <div class="card-eyebrow">Paper orders</div>
-          <div class="card-text"><strong>Risk-gated paper trading.</strong> Max notional per order, kill switch, full order history per tenant.</div>
-        </div>
-        <div class="card">
-          <div class="card-eyebrow">Backtest</div>
-          <div class="card-text"><strong>350 days of real candles.</strong> Strategies are proven on history before they ever touch paper.</div>
-        </div>
-        <div class="card">
-          <div class="card-eyebrow">Reconcile</div>
-          <div class="card-text"><strong>Every figure accounted for.</strong> Orders vs decisions, one endpoint, one source of truth.</div>
-        </div>
-      </div>
-    </section>
-
-    <section class="section" aria-label="Sign in">
-      <div class="section-head">
-        <div>
-          <h2>Sign in</h2>
-          <p>Solo-admin access. The token is kept in this browser only, never in a cookie or URL.</p>
-        </div>
-      </div>
-      <form id="login-form" class="card" style="max-width: 420px;">
+      <form id="login-form">
         <div class="field">
           <label for="login-email">Email</label>
           <input class="input" id="login-email" name="email" type="email" autocomplete="username" value="admin@local" required />
@@ -77,8 +27,9 @@
         </div>
         <div id="login-error" class="alert alert-danger" role="alert" hidden></div>
         <div id="login-ok" class="alert alert-success" role="status" hidden></div>
-        <button class="btn btn-primary btn-block" type="submit" id="login-submit">Sign in</button>
+        <button class="btn btn-primary btn-block" type="submit" id="login-submit">Continue</button>
       </form>
+      <p class="muted" style="text-align: center; margin-top: var(--space-5); font-size: var(--fs-xs);">Paper trading only — no real funds. Solo-admin access.</p>
     </section>
   </main>
 <script>
