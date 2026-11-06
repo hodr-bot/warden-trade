@@ -46,7 +46,7 @@ fn fmt_money(v: f64) -> String {
 }
 
 /// USD amount with explicit `$` sign: `$+8.93`, `$-3.10`, `$0.00`.
-fn fmt_usd(v: f64) -> String {
+pub fn fmt_usd(v: f64) -> String {
     if v == 0.0 {
         "$0.00".to_string()
     } else {
@@ -56,7 +56,7 @@ fn fmt_usd(v: f64) -> String {
 
 /// EUR equivalent in French format (`≈ +8,21 €`), or empty when the
 /// rate is unknown. Pure.
-fn fmt_eur(usd: f64, rate: Option<f64>) -> String {
+pub fn fmt_eur(usd: f64, rate: Option<f64>) -> String {
     match rate {
         Some(r) if r.is_finite() && r > 0.0 => {
             let eur = usd * r;
@@ -68,7 +68,7 @@ fn fmt_eur(usd: f64, rate: Option<f64>) -> String {
 }
 
 /// `up` (green) / `down` (red) / `` (neutral) for delta styling.
-fn delta_class(v: f64) -> &'static str {
+pub fn delta_class(v: f64) -> &'static str {
     if v > 0.0 {
         "up"
     } else if v < 0.0 {
@@ -80,7 +80,7 @@ fn delta_class(v: f64) -> &'static str {
 
 /// Free keyless USD→EUR rate (`open.er-api.com`). `None` on any
 /// failure — the dashboard then simply hides EUR equivalents.
-async fn fetch_usd_eur() -> Option<f64> {
+pub async fn fetch_usd_eur() -> Option<f64> {
     let body: serde_json::Value = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()

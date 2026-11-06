@@ -13,6 +13,7 @@ mod dashboard;
 mod exits;
 mod exchanges;
 mod kraken;
+mod live;
 mod markets;
 mod news;
 mod orchestrator;
@@ -52,6 +53,7 @@ async fn main() {
         .route("/api/agents/run", post(orchestrator::run_cycle_handler))
         .route("/api/autonomy", get(autonomy::autonomy_handler))
         .route("/api/live/status", get(kraken::live_status_handler))
+        .route("/api/live/stream", get(live::stream_handler))
         .route("/api/admin/tenants", get(admin::admin_tenants_handler))
         .nest_service("/static", ServeDir::new("static"))
         .with_state(state.clone());
@@ -60,6 +62,9 @@ async fn main() {
     } else {
         tracing::info!("scheduler off (SCHEDULER_ENABLED=false)");
     }
+    // Real-time marks feed (Kraken public WS, keyless). Runs alongside the
+    // scheduler; pages degrade to 30s HTMX polling if the feed is down.
+    live::spawn_feed();
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     tracing::info!("listening on {addr}");
     axum::serve(listener, app).await.unwrap();

@@ -6,6 +6,7 @@
   <title>Warden Trade — Markets</title>
   {% include "_style.html" %}
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+  <script src="/static/live.js" defer></script>
 </head>
 <body class="page">
   <nav class="nav" aria-label="Primary">
@@ -46,7 +47,7 @@
           <tr>
             <td>{{ s.exchange }}</td>
             <td>{{ s.symbol }}</td>
-            <td class="num">{{ s.price_f64 }}</td>
+            <td class="num" data-mark="{{ s.symbol }}">{{ s.price_f64 }}</td>
             <td class="muted">{{ s.retrieved_at }}</td>
           </tr>
           {% endfor %}

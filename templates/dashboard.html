@@ -6,6 +6,7 @@
   <title>Warden Trade — Dashboard</title>
   {% include "_style.html" %}
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+  <script src="/static/live.js" defer></script>
 </head>
 <body class="page">
   <nav class="nav" aria-label="Primary">
@@ -46,18 +47,18 @@
         </div>
         <div class="card card-accent">
           <div class="card-eyebrow">Portfolio value</div>
-          <div class="card-metric {{ portfolio_class }}">{{ portfolio_value }}</div>
-          <div class="card-footer"><span>Mark-to-market · {{ portfolio_sub }}</span></div>
+          <div class="card-metric {{ portfolio_class }}" data-pf="value">{{ portfolio_value }}</div>
+          <div class="card-footer"><span>Mark-to-market · <span data-pf="value_sub">{{ portfolio_sub }}</span></span></div>
         </div>
         <div class="card">
           <div class="card-eyebrow">Realized PnL</div>
-          <div class="card-metric {{ realized_class }}">{{ pnl_realized }}</div>
-          <div class="card-footer"><span>Closed positions · {{ realized_sub }}</span></div>
+          <div class="card-metric {{ realized_class }}" data-pf="realized">{{ pnl_realized }}</div>
+          <div class="card-footer"><span>Closed positions · <span data-pf="realized_sub">{{ realized_sub }}</span></span></div>
         </div>
         <div class="card">
           <div class="card-eyebrow">Unrealized PnL</div>
-          <div class="card-metric {{ unrealized_class }}">{{ pnl_unrealized }}</div>
-          <div class="card-footer"><span>Open positions · {{ unrealized_sub }}</span></div>
+          <div class="card-metric {{ unrealized_class }}" data-pf="unrealized">{{ pnl_unrealized }}</div>
+          <div class="card-footer"><span>Open positions · <span data-pf="unrealized_sub">{{ unrealized_sub }}</span></span></div>
         </div>
         <div class="card">
           <div class="card-eyebrow">Trades</div>
@@ -85,9 +86,9 @@
           </thead>
           <tbody>
             <tr><td>Capital total</td><td class="num">{{ capital_total }}</td></tr>
-            <tr><td>Portfolio value</td><td class="num {{ portfolio_class }}">{{ portfolio_value }} <span class="muted">{{ portfolio_sub }}</span></td></tr>
-            <tr><td>Realized PnL</td><td class="num {{ realized_class }}">{{ pnl_realized }} <span class="muted">{{ realized_sub }}</span></td></tr>
-            <tr><td>Unrealized PnL</td><td class="num {{ unrealized_class }}">{{ pnl_unrealized }} <span class="muted">{{ unrealized_sub }}</span></td></tr>
+            <tr><td>Portfolio value</td><td class="num {{ portfolio_class }}"><span data-pf="value">{{ portfolio_value }}</span> <span class="muted" data-pf="value_sub">{{ portfolio_sub }}</span></td></tr>
+            <tr><td>Realized PnL</td><td class="num {{ realized_class }}"><span data-pf="realized">{{ pnl_realized }}</span> <span class="muted" data-pf="realized_sub">{{ realized_sub }}</span></td></tr>
+            <tr><td>Unrealized PnL</td><td class="num {{ unrealized_class }}"><span data-pf="unrealized">{{ pnl_unrealized }}</span> <span class="muted" data-pf="unrealized_sub">{{ unrealized_sub }}</span></td></tr>
             <tr><td>Trades count</td><td class="num">{{ trades_count }}</td></tr>
             <tr><td>Fees paid</td><td class="num">{{ fees_paid }}</td></tr>
             <tr><td>Drawdown</td><td class="num">{{ drawdown }}</td></tr>
