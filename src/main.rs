@@ -3,6 +3,7 @@ use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
 
 mod auth;
+mod agents;
 mod coinbase;
 mod dashboard;
 mod exchanges;
