@@ -8,6 +8,7 @@ mod dashboard;
 mod exchanges;
 mod kraken;
 mod markets;
+mod risk;
 mod state;
 
 async fn health() -> &'static str {
