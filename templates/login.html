@@ -23,12 +23,49 @@
   <main class="main container" id="login">
     <div class="section-head">
       <div>
-        <h1>Login</h1>
-        <p>Solo-admin sign in. The token is kept in this browser only.</p>
+        <p><span class="badge badge-warning">Paper trading only — no real funds</span></p>
+        <h1>Warden Trade</h1>
+        <p>Autonomous multi-exchange crypto trading, supervised by AI agents under independent safety limits. Sign in to operate the solo-admin console.</p>
       </div>
     </div>
 
+    <section class="section" aria-label="What you get">
+      <div class="cards">
+        <div class="card card-accent">
+          <div class="card-eyebrow">Live market data</div>
+          <div class="card-metric">BTC-USD</div>
+          <div class="card-footer">Real-time prices from Coinbase and Kraken, timestamped on every quote.</div>
+        </div>
+        <div class="card">
+          <div class="card-eyebrow">Agents</div>
+          <div class="card-text"><strong>8 evaluator agents</strong> — market, technical, strategy, quant, risk, execution, portfolio, performance. Every decision is recorded and reconcilable.</div>
+        </div>
+        <div class="card">
+          <div class="card-eyebrow">Safety</div>
+          <div class="card-text"><strong>Independent limits.</strong> Agents can never change their own limits. API keys stay withdrawal-disabled, encrypted, and out of logs.</div>
+        </div>
+        <div class="card">
+          <div class="card-eyebrow">Paper orders</div>
+          <div class="card-text"><strong>Risk-gated paper trading.</strong> Max notional per order, kill switch, full order history per tenant.</div>
+        </div>
+        <div class="card">
+          <div class="card-eyebrow">Backtest</div>
+          <div class="card-text"><strong>350 days of real candles.</strong> Strategies are proven on history before they ever touch paper.</div>
+        </div>
+        <div class="card">
+          <div class="card-eyebrow">Reconcile</div>
+          <div class="card-text"><strong>Every figure accounted for.</strong> Orders vs decisions, one endpoint, one source of truth.</div>
+        </div>
+      </div>
+    </section>
+
     <section class="section" aria-label="Sign in">
+      <div class="section-head">
+        <div>
+          <h2>Sign in</h2>
+          <p>Solo-admin access. The token is kept in this browser only, never in a cookie or URL.</p>
+        </div>
+      </div>
       <form id="login-form" class="card" style="max-width: 420px;">
         <div class="field">
           <label for="login-email">Email</label>
