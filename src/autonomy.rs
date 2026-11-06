@@ -45,8 +45,9 @@ pub fn validate_limits(limits: &crate::risk::RiskLimits) -> bool {
 /// - `prices`: forwarded to [`crate::backtest::run_backtest`].
 ///
 /// `decisions` is `run_cycle(symbol).len()`, `wins` / `total_pnl_f64` come
-/// from `run_backtest(strategy, prices)`, and `limits_ok` is
-/// `validate_limits` applied to sane paper defaults. No network, no secrets.
+/// from `run_backtest(strategy, prices)`, `limits_ok` is
+/// `validate_limits` applied to sane paper defaults, and `generated_at`
+/// is the current backend time. No network, no secrets.
 pub fn run_paper_cycle(symbol: &str, strategy: &str, prices: &[f64]) -> AutonomyReport {
     let decisions = crate::orchestrator::run_cycle(symbol).len();
     let backtest = crate::backtest::run_backtest(strategy, prices);
@@ -63,7 +64,7 @@ pub fn run_paper_cycle(symbol: &str, strategy: &str, prices: &[f64]) -> Autonomy
         wins: backtest.wins,
         total_pnl_f64: backtest.total_pnl_f64,
         limits_ok: validate_limits(&default_limits),
-        generated_at: "1970-01-01T00:00:00Z".to_string(),
+        generated_at: chrono::Utc::now().to_rfc3339(),
     }
 }
 

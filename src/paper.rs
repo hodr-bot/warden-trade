@@ -6,10 +6,13 @@
 use crate::risk::{check_order, OrderIntent, RiskLimits};
 
 /// A single paper order kept in memory.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PaperOrder {
     /// Unique ledger id (e.g. `"paper-1"`).
     pub id: String,
+    /// Exchange name, e.g. `"paper"`, `"coinbase"`, `"kraken"`.
+    #[serde(default = "default_exchange")]
+    pub exchange: String,
     /// Trading symbol, e.g. `"BTC-USD"`.
     pub symbol: String,
     /// Order side, e.g. `"buy"` or `"sell"`.
@@ -22,6 +25,11 @@ pub struct PaperOrder {
     pub status: String,
     /// RFC3339 creation timestamp.
     pub created_at: String,
+}
+
+/// Default exchange name for paper orders.
+fn default_exchange() -> String {
+    "paper".to_string()
 }
 
 /// In-memory ledger of paper orders.
@@ -46,6 +54,7 @@ impl PaperLedger {
         let id = format!("paper-{}", self.orders.len() + 1);
         self.orders.push(PaperOrder {
             id: id.clone(),
+            exchange: "paper".to_string(),
             symbol: intent.symbol,
             side: intent.side,
             qty: intent.qty,

@@ -35,7 +35,7 @@ async fn main() {
         .route("/health", get(health))
         .route("/", get(dashboard::dashboard_handler))
         .route("/api/markets", get(markets::markets_handler))
-        .route("/api/orders", get(orders::orders_handler))
+        .route("/api/orders", get(orders::orders_handler).post(orders::create_order_handler))
         .route("/api/agents", get(orchestrator::agents_handler))
         .route("/api/autonomy", get(autonomy::autonomy_handler))
         .route("/api/admin/tenants", get(admin::admin_tenants_handler))

@@ -48,7 +48,7 @@ pub struct AgentDecision {
 /// Pure stub evaluator: always returns a `hold` decision.
 ///
 /// Deterministic: confidence is always `0.0`, reason is always `"stub"`,
-/// and `created_at` is a fixed constant. No network, no secrets, no I/O.
+/// and `created_at` is the current backend time. No network, no secrets, no I/O.
 pub fn evaluate_stub(agent: &AgentId, _kind: &AgentKind, symbol: &str) -> AgentDecision {
     AgentDecision {
         agent: agent.0.clone(),
@@ -56,7 +56,7 @@ pub fn evaluate_stub(agent: &AgentId, _kind: &AgentKind, symbol: &str) -> AgentD
         symbol: symbol.to_string(),
         confidence: 0.0,
         reason: "stub".to_string(),
-        created_at: "1970-01-01T00:00:00Z".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
     }
 }
 
