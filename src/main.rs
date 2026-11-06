@@ -6,6 +6,7 @@ mod auth;
 mod coinbase;
 mod dashboard;
 mod exchanges;
+mod kraken;
 mod state;
 
 async fn health() -> &'static str {
