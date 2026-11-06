@@ -8,6 +8,7 @@ mod dashboard;
 mod exchanges;
 mod kraken;
 mod markets;
+mod paper;
 mod risk;
 mod state;
 
