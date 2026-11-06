@@ -29,7 +29,7 @@ pub enum AgentKind {
 }
 
 /// A single agent decision (stub shape).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct AgentDecision {
     /// Agent identifier that produced the decision.
     pub agent: String,
