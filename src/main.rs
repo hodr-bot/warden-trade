@@ -2,6 +2,7 @@ use axum::{response::Html, routing::get, Router};
 use tracing_subscriber::EnvFilter;
 
 mod auth;
+mod state;
 
 async fn health() -> &'static str {
     "ok"
