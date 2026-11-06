@@ -112,13 +112,14 @@ mod tests {
     #[test]
     fn cycle_report_has_4_decisions() {
         // 13 climbing prices: SMA crossover fires once, one winning trade.
+        // decisions = the 8-agent roster size (see orchestrator::run_cycle).
         let prices = vec![
             100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, //
             101.0, 102.0, 103.0, 104.0, 105.0,
         ];
         let report = run_paper_cycle("BTC-USD", "sma", &prices);
         assert_eq!(report.symbol, "BTC-USD");
-        assert_eq!(report.decisions, 4);
+        assert_eq!(report.decisions, 8);
         assert!(report.limits_ok);
         assert_eq!(report.wins, 1);
         assert!(report.total_pnl_f64 > 0.0);

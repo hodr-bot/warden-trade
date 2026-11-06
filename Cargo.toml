@@ -21,6 +21,3 @@ jsonwebtoken = "9"
 config = "0.15"
 dotenvy = "0.15"
 reqwest = { version = "0.13.5", features = ["json"] }
-
-[dev-dependencies]
-axum-test = "17"

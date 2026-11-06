@@ -44,6 +44,7 @@ async fn main() {
         .route("/api/auth/login", post(auth_routes::login_handler))
         .route("/api/reconcile", get(reconcile::reconcile_handler))
         .route("/api/agents", get(orchestrator::agents_handler))
+        .route("/api/agents/run", post(orchestrator::run_cycle_handler))
         .route("/api/autonomy", get(autonomy::autonomy_handler))
         .route("/api/admin/tenants", get(admin::admin_tenants_handler))
         .nest_service("/static", ServeDir::new("static"))

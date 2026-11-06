@@ -61,6 +61,59 @@ pub fn check_order(limits: &RiskLimits, intent: &OrderIntent) -> Result<(), Stri
     Ok(())
 }
 
+impl RiskLimits {
+    /// Conservative fallback used when the database is unreachable.
+    ///
+    /// Pure constructor: no network, no secrets, no I/O. The server stays
+    /// up in degraded mode instead of accepting unlimited orders.
+    pub fn conservative_default() -> Self {
+        Self {
+            max_order_notional: 10_000.0,
+            max_exposure_per_asset: 50_000.0,
+            max_daily_loss: 1_000.0,
+            max_open_orders: 10,
+            kill_switch: false,
+        }
+    }
+}
+
+/// Load the risk limits configured for `tenant_id`.
+///
+/// Read-only: the risk engine never writes limits. When the row is missing
+/// or the database is unreachable, returns [`RiskLimits::conservative_default`]
+/// and logs why, so order flow degrades closed (tight limits) rather than
+/// open. Agents have no path to this table's writes: only a direct DB
+/// operator can change limits.
+pub async fn load_limits(pool: &sqlx::PgPool, tenant_id: uuid::Uuid) -> RiskLimits {
+    let row = sqlx::query(
+        "SELECT max_order_notional, max_exposure_per_asset, max_daily_loss, max_open_orders, kill_switch
+         FROM risk_limits WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await;
+    match row {
+        Ok(Some(row)) => {
+            use sqlx::Row;
+            RiskLimits {
+                max_order_notional: row.try_get("max_order_notional").unwrap_or(10_000.0),
+                max_exposure_per_asset: row.try_get("max_exposure_per_asset").unwrap_or(50_000.0),
+                max_daily_loss: row.try_get("max_daily_loss").unwrap_or(1_000.0),
+                max_open_orders: row.try_get::<i32, _>("max_open_orders").unwrap_or(10).max(1) as u32,
+                kill_switch: row.try_get("kill_switch").unwrap_or(false),
+            }
+        }
+        Ok(None) => {
+            tracing::warn!("no risk_limits row, using conservative defaults");
+            RiskLimits::conservative_default()
+        }
+        Err(e) => {
+            tracing::warn!("risk_limits unreadable, using conservative defaults: {e}");
+            RiskLimits::conservative_default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

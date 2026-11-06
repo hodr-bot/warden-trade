@@ -88,8 +88,12 @@ pub async fn login_handler(
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("user: {e}")))?
         }
         None => {
-            // Auto-provision only the configured admin email; anything else is 401.
-            if email != admin_email_norm {
+            // Auto-provision only the configured admin email AND the configured
+            // admin password; anything else is 401. Without this check, anyone
+            // calling login first with the (public-shaped) admin email could
+            // claim the admin account with a password of their choice.
+            if email != admin_email_norm || req.password != admin_password() {
+                // Same error either way: never reveal whether the email exists.
                 return Err((StatusCode::UNAUTHORIZED, "invalid credentials".to_string()));
             }
             let hash = crate::auth::hash_password(&req.password)
@@ -117,7 +121,6 @@ pub async fn login_handler(
         state.jwt_secret.as_bytes(),
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("jwt: {e}")))?;
-    let _ = admin_password;
     Ok(Json(LoginResponse { token }))
 }
 

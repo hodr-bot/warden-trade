@@ -9,19 +9,8 @@ use axum::{extract::State, http::StatusCode, Json};
 use serde::Deserialize;
 
 use crate::paper::PaperOrder;
-use crate::risk::{check_order, OrderIntent, RiskLimits};
+use crate::risk::{check_order, load_limits, OrderIntent};
 use crate::state::{AppState, Tenant};
-
-/// Default paper risk limits (same bounds as autonomy reports).
-fn default_limits() -> RiskLimits {
-    RiskLimits {
-        max_order_notional: 10_000.0,
-        max_exposure_per_asset: 50_000.0,
-        max_daily_loss: 1_000.0,
-        max_open_orders: 10,
-        kill_switch: false,
-    }
-}
 
 /// Incoming order request (JSON body for `POST /api/orders`).
 #[derive(Debug, Clone, Deserialize)]
@@ -131,7 +120,11 @@ pub async fn create_order_handler(
         qty: req.qty,
         price: req.price,
     };
-    check_order(&default_limits(), &intent)
+    // Risk gate: per-tenant limits from Postgres (conservative fallback
+    // when unreadable). The engine never writes limits; agents have no path
+    // to change them.
+    let limits = load_limits(&state.pool, tenant_id).await;
+    check_order(&limits, &intent)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let row = sqlx::query(
@@ -274,7 +267,7 @@ mod tests {
             qty: 100.0,
             price: 500.0,
         };
-        assert!(check_order(&default_limits(), &intent).is_err());
+        assert!(check_order(&crate::risk::RiskLimits::conservative_default(), &intent).is_err());
     }
 
     #[test]
