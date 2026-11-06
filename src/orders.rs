@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::paper::PaperOrder;
 use crate::risk::{check_order, OrderIntent, RiskLimits};
-use crate::state::AppState;
+use crate::state::{AppState, Tenant};
 
 /// Default paper risk limits (same bounds as autonomy reports).
 fn default_limits() -> RiskLimits {
@@ -41,7 +41,8 @@ fn default_exchange_name() -> String {
 /// Ensure a tenant exists and return its id.
 ///
 /// Solo-admin first: reuse the oldest tenant, creating `solo-admin`
-/// when the table is empty.
+/// when the table is empty. (Used by tests and bootstrap; request
+/// handlers use the authenticated [`Tenant`] instead.)
 async fn ensure_tenant(pool: &sqlx::PgPool) -> Result<uuid::Uuid, sqlx::Error> {
     if let Some(row) = sqlx::query("SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1")
         .fetch_optional(pool)
@@ -57,14 +58,24 @@ async fn ensure_tenant(pool: &sqlx::PgPool) -> Result<uuid::Uuid, sqlx::Error> {
     row.try_get("id")
 }
 
-/// Return persisted paper orders as JSON (newest first, max 100).
+/// Return the authenticated tenant's paper orders as JSON (newest first, max 100).
 ///
-/// Falls back to an empty list when the database is unreachable.
-pub async fn orders_handler(State(state): State<AppState>) -> Json<Vec<PaperOrder>> {
+/// Requires `Authorization: Bearer <JWT>` via [`Tenant`]; rows are
+/// filtered on `tenant_id`. Falls back to an empty list when the
+/// database is unreachable.
+pub async fn orders_handler(
+    tenant: Tenant,
+    State(state): State<AppState>,
+) -> Json<Vec<PaperOrder>> {
+    let tenant_id: uuid::Uuid = match tenant.tenant_id.parse() {
+        Ok(id) => id,
+        Err(_) => return Json(vec![]),
+    };
     let rows = sqlx::query(
         "SELECT id::TEXT AS id, exchange, symbol, side, qty, price, status, created_at
-         FROM paper_orders ORDER BY created_at DESC LIMIT 100",
+         FROM paper_orders WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 100",
     )
+    .bind(tenant_id)
     .fetch_all(&state.pool)
     .await;
     match rows {
@@ -95,14 +106,20 @@ pub async fn orders_handler(State(state): State<AppState>) -> Json<Vec<PaperOrde
     }
 }
 
-/// Validate via the risk engine then persist a paper order.
+/// Validate via the risk engine then persist a paper order for the authenticated tenant.
 ///
+/// Requires `Authorization: Bearer <JWT>` via [`Tenant`].
 /// Rejections from [`check_order`] become `400`; DB failures become `500`.
 /// Success returns `201` with the persisted order.
 pub async fn create_order_handler(
+    tenant: Tenant,
     State(state): State<AppState>,
     Json(req): Json<CreateOrderRequest>,
 ) -> Result<(StatusCode, Json<PaperOrder>), (StatusCode, String)> {
+    let tenant_id: uuid::Uuid = tenant
+        .tenant_id
+        .parse()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid tenant".to_string()))?;
     let side = req.side.to_ascii_lowercase();
     if side != "buy" && side != "sell" {
         return Err((StatusCode::BAD_REQUEST, "side must be buy or sell".to_string()));
@@ -116,11 +133,7 @@ pub async fn create_order_handler(
     check_order(&default_limits(), &intent)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
-    let tenant_id = ensure_tenant(&state.pool)
-        .await
-        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("no tenant: {e}")))?;
-
-   let row = sqlx::query(
+    let row = sqlx::query(
         "INSERT INTO paper_orders (tenant_id, exchange, symbol, side, qty, price, status, idempotency_key)
          VALUES ($1, $2, $3, $4, $5, $6, 'filled', $7)
          RETURNING id::TEXT AS id, exchange, symbol, side, qty, price, status, created_at",
@@ -172,9 +185,23 @@ mod tests {
         }
     }
 
+    fn test_tenant() -> Tenant {
+        Tenant {
+            tenant_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            user_id: "00000000-0000-0000-0000-000000000002".to_string(),
+        }
+    }
+
     #[tokio::test]
     async fn orders_handler_falls_back_to_empty_without_db() {
-        let Json(orders) = orders_handler(State(test_state_unreachable())).await;
+        let Json(orders) = orders_handler(test_tenant(), State(test_state_unreachable())).await;
+        assert!(orders.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_tenant_returns_empty() {
+        let bad = Tenant { tenant_id: "not-a-uuid".to_string(), user_id: "u".to_string() };
+        let Json(orders) = orders_handler(bad, State(test_state_unreachable())).await;
         assert!(orders.is_empty());
     }
 

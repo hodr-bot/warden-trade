@@ -1,9 +1,10 @@
-use axum::{routing::get, Router};
+use axum::{routing::get, routing::post, Router};
 use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
 
 mod admin;
 mod auth;
+mod auth_routes;
 mod agents;
 mod autonomy;
 mod backtest;
@@ -15,6 +16,7 @@ mod markets;
 mod orchestrator;
 mod orders;
 mod paper;
+mod reconcile;
 mod risk;
 mod state;
 
@@ -36,6 +38,8 @@ async fn main() {
         .route("/", get(dashboard::dashboard_handler))
         .route("/api/markets", get(markets::markets_handler))
         .route("/api/orders", get(orders::orders_handler).post(orders::create_order_handler))
+        .route("/api/auth/login", post(auth_routes::login_handler))
+        .route("/api/reconcile", get(reconcile::reconcile_handler))
         .route("/api/agents", get(orchestrator::agents_handler))
         .route("/api/autonomy", get(autonomy::autonomy_handler))
         .route("/api/admin/tenants", get(admin::admin_tenants_handler))
