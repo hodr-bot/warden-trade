@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Warden Trade — Dashboard</title>
-  <link rel="stylesheet" href="/static/css/design.css" />
+  {% include "_style.html" %}
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
 </head>
 <body class="page">
@@ -95,13 +95,15 @@
       </div>
     </section>
 
-    <!-- Empty block -->
+    <!-- Empty block (only when there is no trade) -->
+    {% if trades_count == "0" %}
     <div id="dashboard-empty" class="state" role="status">
       <div class="state-icon" aria-hidden="true">&#9673;</div>
       <div class="state-title">No data yet</div>
       <p>No trades recorded for this tenant. Place a paper trade to populate the dashboard.</p>
       <a class="btn btn-primary btn-sm" href="/orders">View orders</a>
     </div>
+    {% endif %}
 
     <!-- Loading block -->
     <div id="dashboard-loading" class="loading-row" role="status" aria-live="polite" hidden>

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Warden Trade — Markets</title>
-  <link rel="stylesheet" href="/static/css/design.css" />
+  {% include "_style.html" %}
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
 </head>
 <body class="page">
@@ -36,14 +36,14 @@
     <section class="section" aria-label="Live prices">
       <table class="table">
         <thead>
-          <tr><th>Exchange</th><th>Symbol</th><th>Price</th><th>Retrieved at</th></tr>
+          <tr><th>Exchange</th><th>Symbol</th><th class="num">Price</th><th>Retrieved at</th></tr>
         </thead>
         <tbody>
           {% for s in snapshots %}
           <tr>
             <td>{{ s.exchange }}</td>
             <td>{{ s.symbol }}</td>
-            <td>{{ s.price_f64 }}</td>
+            <td class="num">{{ s.price_f64 }}</td>
             <td class="muted">{{ s.retrieved_at }}</td>
           </tr>
           {% endfor %}

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Warden Trade — Orders</title>
-  <link rel="stylesheet" href="/static/css/design.css" />
+  {% include "_style.html" %}
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
 </head>
 <body class="page">
@@ -36,7 +36,7 @@
     <section class="section" aria-label="Paper orders">
       <table class="table">
         <thead>
-          <tr><th>ID</th><th>Exchange</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Status</th><th>Created at</th></tr>
+          <tr><th>ID</th><th>Exchange</th><th>Symbol</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th><th>Status</th><th>Created at</th></tr>
         </thead>
         <tbody>
           {% for o in orders %}
@@ -45,8 +45,8 @@
             <td>{{ o.exchange }}</td>
             <td>{{ o.symbol }}</td>
             <td>{{ o.side }}</td>
-            <td>{{ o.qty }}</td>
-            <td>{{ o.price }}</td>
+            <td class="num">{{ o.qty }}</td>
+            <td class="num">{{ o.price }}</td>
             <td>{{ o.status }}</td>
             <td class="muted">{{ o.created_at }}</td>
           </tr>
