@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Warden Trade — Dashboard</title>
+  <link rel="stylesheet" href="/static/css/design.css" />
+  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+</head>
+<body class="page">
+  <nav class="nav" aria-label="Primary">
+    <div class="nav-inner">
+      <a class="nav-brand" href="/"><span class="nav-brand-mark" aria-hidden="true"></span>Warden Trade</a>
+      <ul class="nav-links">
+        <li><a href="/" aria-current="page">Dashboard</a></li>
+        <li><a href="/trades">Trades</a></li>
+        <li><a href="/settings">Settings</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <main class="main container" id="dashboard">
+    <div class="section-head">
+      <div>
+        <h1>Dashboard</h1>
+        <p>Paper-trading overview. <span class="muted">Generated at {{ generated_at }}</span></p>
+      </div>
+      <button
+        class="btn btn-secondary btn-sm"
+        hx-get="/dashboard"
+        hx-target="#dashboard"
+        hx-swap="outerHTML"
+      >Refresh</button>
+    </div>
+
+    <!-- Summary cards -->
+    <section class="section" aria-label="Portfolio summary">
+      <div class="cards">
+        <div class="card">
+          <div class="card-eyebrow">Capital total</div>
+          <div class="card-metric">{{ capital_total }}</div>
+          <div class="card-footer"><span>Funded capital</span></div>
+        </div>
+        <div class="card card-accent">
+          <div class="card-eyebrow">Portfolio value</div>
+          <div class="card-metric">{{ portfolio_value }}</div>
+          <div class="card-footer"><span>Mark-to-market</span></div>
+        </div>
+        <div class="card">
+          <div class="card-eyebrow">Realized PnL</div>
+          <div class="card-metric">{{ pnl_realized }}</div>
+          <div class="card-footer"><span>Closed positions</span></div>
+        </div>
+        <div class="card">
+          <div class="card-eyebrow">Unrealized PnL</div>
+          <div class="card-metric">{{ pnl_unrealized }}</div>
+          <div class="card-footer"><span>Open positions</span></div>
+        </div>
+        <div class="card">
+          <div class="card-eyebrow">Trades</div>
+          <div class="card-metric">{{ trades_count }}</div>
+          <div class="card-footer"><span>Win rate {{ win_rate }}</span></div>
+        </div>
+        <div class="card">
+          <div class="card-eyebrow">Fees paid</div>
+          <div class="card-metric">{{ fees_paid }}</div>
+          <div class="card-footer"><span>Drawdown {{ drawdown }}</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Detail table (htmx target) -->
+    <section class="section" aria-label="Metrics detail">
+      <div class="table-wrap">
+        <table class="table">
+          <caption>Dashboard metrics</caption>
+          <thead>
+            <tr>
+              <th scope="col">Metric</th>
+              <th scope="col" class="num">Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>Capital total</td><td class="num">{{ capital_total }}</td></tr>
+            <tr><td>Portfolio value</td><td class="num">{{ portfolio_value }}</td></tr>
+            <tr><td>Realized PnL</td><td class="num">{{ pnl_realized }}</td></tr>
+            <tr><td>Unrealized PnL</td><td class="num">{{ pnl_unrealized }}</td></tr>
+            <tr><td>Trades count</td><td class="num">{{ trades_count }}</td></tr>
+            <tr><td>Fees paid</td><td class="num">{{ fees_paid }}</td></tr>
+            <tr><td>Drawdown</td><td class="num">{{ drawdown }}</td></tr>
+            <tr><td>Win rate</td><td class="num">{{ win_rate }}</td></tr>
+            <tr><td>Generated at</td><td class="num">{{ generated_at }}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Empty block -->
+    <div id="dashboard-empty" class="state" role="status">
+      <div class="state-icon" aria-hidden="true">&#9673;</div>
+      <div class="state-title">No data yet</div>
+      <p>No trades recorded for this tenant. Place a paper trade to populate the dashboard.</p>
+      <a class="btn btn-primary btn-sm" href="/trades">View trades</a>
+    </div>
+
+    <!-- Loading block -->
+    <div id="dashboard-loading" class="loading-row" role="status" aria-live="polite" hidden>
+      <span class="spinner spinner-sm" aria-hidden="true"></span>
+      <span>Loading dashboard&hellip;</span>
+    </div>
+    <div id="dashboard-loading-skeleton" class="cards" aria-hidden="true" hidden>
+      <div class="card"><div class="card-eyebrow">Loading</div><div class="skeleton">&nbsp;</div></div>
+      <div class="card"><div class="card-eyebrow">Loading</div><div class="skeleton">&nbsp;</div></div>
+      <div class="card"><div class="card-eyebrow">Loading</div><div class="skeleton">&nbsp;</div></div>
+    </div>
+
+    <!-- Error block -->
+    <div id="dashboard-error" class="state state-error" role="alert" hidden>
+      <div class="state-icon" aria-hidden="true">!</div>
+      <div class="state-title">Dashboard unavailable</div>
+      <p>Could not load dashboard metrics. Please retry.</p>
+      <button
+        class="btn btn-secondary btn-sm"
+        hx-get="/dashboard"
+        hx-target="#dashboard"
+        hx-swap="outerHTML"
+      >Retry</button>
+    </div>
+  </main>
+</body>
+</html>
