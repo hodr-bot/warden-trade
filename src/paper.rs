@@ -6,7 +6,7 @@
 use crate::risk::{check_order, OrderIntent, RiskLimits};
 
 /// A single paper order kept in memory.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PaperOrder {
     /// Unique ledger id (e.g. `"paper-1"`).
     pub id: String,

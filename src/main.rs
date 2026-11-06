@@ -8,6 +8,7 @@ mod dashboard;
 mod exchanges;
 mod kraken;
 mod markets;
+mod orders;
 mod paper;
 mod risk;
 mod state;
@@ -25,6 +26,7 @@ async fn main() {
         .route("/health", get(health))
         .route("/", get(dashboard::dashboard_handler))
         .route("/api/markets", get(markets::markets_handler))
+        .route("/api/orders", get(orders::orders_handler))
         .nest_service("/static", ServeDir::new("static"));
     let addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
