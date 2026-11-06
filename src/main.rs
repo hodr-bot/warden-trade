@@ -10,6 +10,7 @@ mod autonomy;
 mod backtest;
 mod coinbase;
 mod dashboard;
+mod exits;
 mod exchanges;
 mod kraken;
 mod markets;

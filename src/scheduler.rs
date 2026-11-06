@@ -80,6 +80,22 @@ async fn last_side(pool: &sqlx::PgPool, tenant_id: uuid::Uuid, symbol: &str) -> 
     row.map(|r| r.0)
 }
 
+/// Open long on a symbol from fills: `(qty, average entry price)`.
+///
+/// `(0, 0)` when flat or net-short. Used to forbid short selling:
+/// a `sell` signal with nothing held is skipped, never executed.
+async fn long_held(pool: &sqlx::PgPool, tenant_id: uuid::Uuid, symbol: &str) -> (f64, f64) {
+    let fills: Vec<(String, f64, f64)> = sqlx::query_as(
+        "SELECT side, qty, price FROM paper_orders WHERE tenant_id = $1 AND symbol = $2 ORDER BY created_at ASC",
+    )
+    .bind(tenant_id)
+    .bind(symbol)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    crate::dashboard::long_position(&fills)
+}
+
 /// One autonomous tick: cycle + optional single paper order.
 ///
 /// Returns a short human-readable summary for the logs. Never panics;
@@ -130,13 +146,43 @@ async fn tick_symbol(
         );
     }
     let side = strategy.unwrap_or("hold");
-    if last_side(&state.pool, tenant_id, symbol).await.as_deref() == Some(side) {
-        return format!("{symbol} skipped: already positioned {side}");
-    }
     let price = match closes.last().copied() {
         Some(p) if p.is_finite() && p > 0.0 => p,
         _ => return format!("{symbol} skipped: no price to trade"),
     };
+    if side == "sell" {
+        // No short selling on spot paper: cap the sell at what we hold.
+        let (held, _) = long_held(&state.pool, tenant_id, symbol).await;
+        let capped = crate::exits::cap_sell_qty(sized_qty(&closes, price), held);
+        if capped <= 0.0 {
+            return format!("{symbol} skipped: sell signal with no position held");
+        }
+        let slot = chrono::Utc::now().timestamp() / scheduler_interval_secs() as i64;
+        let key = format!("sched-{side}-{symbol}-{slot}");
+        match crate::orders::place_paper_order(
+            &state.pool,
+            tenant_id,
+            "coinbase",
+            symbol,
+            side,
+            capped,
+            price,
+            Some(&key),
+        )
+        .await
+        {
+            Ok(order) => {
+                return format!(
+                    "{symbol} placed {side} {} @ {:.2} (id {})",
+                    order.qty, order.price, order.id
+                )
+            }
+            Err((status, msg)) => return format!("{symbol} order rejected ({status}): {msg}"),
+        }
+    }
+    if last_side(&state.pool, tenant_id, symbol).await.as_deref() == Some(side) {
+        return format!("{symbol} skipped: already positioned {side}");
+    }
     let qty = sized_qty(&closes, price);
     if qty <= 0.0 {
         return format!("{symbol} skipped: no size to trade");

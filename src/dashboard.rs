@@ -95,6 +95,40 @@ async fn fetch_usd_eur() -> Option<f64> {
     body.get("rates")?.get("EUR")?.as_f64()
 }
 
+/// Net long position from fills: `(qty, average entry price)`.
+///
+/// FIFO consumption of buys by sells. `(0, 0)` when flat or net-short:
+/// protective exits only manage long exposure.
+pub fn long_position(fills: &[(String, f64, f64)]) -> (f64, f64) {
+    let mut lots: Vec<(f64, f64)> = Vec::new();
+    for (side, qty, price) in fills {
+        if side == "buy" {
+            lots.push((*qty, *price));
+        } else {
+            let mut rest = *qty;
+            while rest > 0.0 {
+                match lots.first_mut() {
+                    Some((q, _)) => {
+                        let m = rest.min(*q);
+                        *q -= m;
+                        rest -= m;
+                        if *q <= 0.0 {
+                            lots.remove(0);
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    let qty: f64 = lots.iter().map(|(q, _)| q).sum();
+    if qty <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let notional: f64 = lots.iter().map(|(q, p)| q * p).sum();
+    (qty, notional / qty)
+}
+
 /// FIFO PnL over `(side, qty, price)` fills, oldest first.
 ///
 /// Returns `(realized, closed_trades, wins, net_qty, net_avg_price)`.
@@ -170,6 +204,34 @@ fn fifo_pnl(fills: &[(String, f64, f64)]) -> (f64, usize, usize, f64, f64) {
     (realized, closed, wins, net, avg)
 }
 
+/// Pure valuation: per-symbol FIFO + per-symbol marks.
+///
+/// `marks` maps symbol → current price. Symbols without a mark (feed down)
+/// keep their realized PnL but contribute no unrealized/open value —
+/// never valued at another symbol's price.
+pub fn value_positions(
+    by_symbol: &std::collections::BTreeMap<String, Vec<(String, f64, f64)>>,
+    marks: &std::collections::BTreeMap<String, f64>,
+) -> (f64, usize, usize, f64, f64) {
+    let (mut realized, mut closed, mut wins, mut unrealized, mut open_value) =
+        (0.0, 0usize, 0usize, 0.0, 0.0);
+    for (symbol, fills) in by_symbol {
+        let (r, c, w, net, avg) = fifo_pnl(fills);
+        realized += r;
+        closed += c;
+        wins += w;
+        if net != 0.0 {
+            if let Some(mark) = marks.get(symbol) {
+                if *mark > 0.0 {
+                    unrealized += net * (mark - avg);
+                    open_value += net * mark;
+                }
+            }
+        }
+    }
+    (realized, closed, wins, unrealized, open_value)
+}
+
 /// Backend handler building the dashboard from live Postgres data.
 pub async fn dashboard_handler(State(state): State<AppState>) -> axum::response::Html<String> {
     let fills: Vec<(String, String, f64, f64)> = sqlx::query_as(
@@ -190,22 +252,26 @@ pub async fn dashboard_handler(State(state): State<AppState>) -> axum::response:
             .or_default()
             .push((side.clone(), *qty, *price));
     }
-    let spot = crate::coinbase::CoinbaseClient::new()
-        .fetch_spot_price("BTC-USD")
-        .await
-        .unwrap_or(0.0);
-    let (mut realized, mut closed, mut wins, mut unrealized, mut open_value) =
-        (0.0, 0usize, 0usize, 0.0, 0.0);
-    for fills in by_symbol.values() {
-        let (r, c, w, net, avg) = fifo_pnl(fills);
-        realized += r;
-        closed += c;
-        wins += w;
-        if net != 0.0 && spot > 0.0 {
-            unrealized += net * (spot - avg);
-            open_value += net * spot;
+    // One mark per held symbol: never value SOL at BTC's price.
+    // Only symbols with a nonzero net position need a feed call.
+    let mut held: Vec<String> = Vec::new();
+    for (symbol, fills) in &by_symbol {
+        let (_, _, _, net, _) = fifo_pnl(fills);
+        if net != 0.0 {
+            held.push(symbol.clone());
         }
     }
+    let client = crate::coinbase::CoinbaseClient::new();
+    let mut marks: BTreeMap<String, f64> = BTreeMap::new();
+    for symbol in &held {
+        let mark = client.fetch_spot_price(symbol).await.unwrap_or(0.0);
+        if mark > 0.0 {
+            marks.insert(symbol.clone(), mark);
+        } else {
+            tracing::warn!("dashboard {symbol} degraded: no mark, position held at cost");
+        }
+    }
+    let (realized, closed, wins, unrealized, open_value) = value_positions(&by_symbol, &marks);
     let signals: Vec<String> = sqlx::query(
         "SELECT agent, action, symbol FROM agent_decisions ORDER BY created_at DESC LIMIT 8",
     )
