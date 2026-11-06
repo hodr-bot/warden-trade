@@ -18,7 +18,9 @@ mod orders;
 mod paper;
 mod reconcile;
 mod risk;
+mod scheduler;
 mod state;
+mod strategies;
 
 async fn health() -> &'static str {
     "ok"
@@ -49,7 +51,12 @@ async fn main() {
         .route("/api/autonomy", get(autonomy::autonomy_handler))
         .route("/api/admin/tenants", get(admin::admin_tenants_handler))
         .nest_service("/static", ServeDir::new("static"))
-        .with_state(state);
+        .with_state(state.clone());
+    if scheduler::scheduler_enabled() {
+        scheduler::spawn(state);
+    } else {
+        tracing::info!("scheduler off (SCHEDULER_ENABLED=false)");
+    }
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     tracing::info!("listening on {addr}");
     axum::serve(listener, app).await.unwrap();

@@ -4,7 +4,9 @@ use axum::{
 };
 use sqlx::PgPool;
 
-/// Shared application state, injected into every handler via `State<AppState>`.
+/// Shared application state: Postgres pool plus JWT secret.
+///
+/// `Clone` so the autonomous scheduler can own a copy alongside Axum.
 #[derive(Clone)]
 pub struct AppState {
     /// Postgres connection pool. Every query must filter on `tenant_id`.

@@ -1,0 +1,168 @@
+//! Autonomous paper-trading scheduler (paper only, never real funds).
+//!
+//! Every [`interval`](scheduler_interval_secs) the scheduler runs one
+//! [`orchestrator`](crate::orchestrator) cycle on live Coinbase prices
+//! for the solo-admin tenant and, when strategy and risk agree on a
+//! `buy`/`sell` intent, places exactly one paper order through the same
+//! risk-gated [`place_paper_order`](crate::orders::place_paper_order)
+//! path as the manual API.
+//!
+//! Position discipline: a signal matching the side of the tenant's most
+//! recent order for the symbol is skipped (`already positioned`), so the
+//! bot alternates long/flat instead of stacking. The idempotency key
+//! pins each cycle slot, so a retried cycle can never double-place.
+//! `SCHEDULER_ENABLED=false` disables the loop; the kill switch in
+//! `risk_limits` stays the emergency brake (checked on every order).
+
+use crate::orchestrator::{live_closes, record_decisions, run_cycle_with_prices, TARGET_NOTIONAL};
+use crate::state::AppState;
+
+/// Scheduler tick interval, read from `SCHEDULER_INTERVAL_SECS` (default 300s).
+pub fn scheduler_interval_secs() -> u64 {
+    std::env::var("SCHEDULER_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v: &u64| *v >= 30)
+        .unwrap_or(300)
+}
+
+/// Whether the autonomous loop runs (`SCHEDULER_ENABLED`, default true).
+pub fn scheduler_enabled() -> bool {
+    std::env::var("SCHEDULER_ENABLED")
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(true)
+}
+
+/// Oldest tenant id (solo-admin first). The scheduler trades for the
+/// tenant the login flow provisions; missing DB degrades to `None`
+/// (cycle skipped, retried next tick).
+async fn solo_tenant(pool: &sqlx::PgPool) -> Option<uuid::Uuid> {
+    let row: Option<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1")
+            .fetch_optional(pool)
+            .await
+            .ok()?;
+    row.map(|r| r.0)
+}
+
+/// Side of the tenant's most recent order for `symbol`, if any.
+async fn last_side(pool: &sqlx::PgPool, tenant_id: uuid::Uuid, symbol: &str) -> Option<String> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT side FROM paper_orders WHERE tenant_id = $1 AND symbol = $2 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(tenant_id)
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await
+    .ok()?;
+    row.map(|r| r.0)
+}
+
+/// One autonomous tick: cycle + optional single paper order.
+///
+/// Returns a short human-readable summary for the logs. Never panics;
+/// feed or DB failures degrade to hold/skip, never to a trade.
+pub async fn tick(state: &AppState) -> String {
+    const SYMBOL: &str = "BTC-USD";
+    let tenant_id = match solo_tenant(&state.pool).await {
+        Some(id) => id,
+        None => return "tick skipped: no tenant".to_string(),
+    };
+    let closes = live_closes().await.unwrap_or_default();
+    let decisions = run_cycle_with_prices(SYMBOL, &closes);
+    if let Err(e) = record_decisions(&state.pool, tenant_id, &decisions).await {
+        return format!("tick degraded: decisions not recorded: {e}");
+    }
+    let action_of = |id: &str| decisions.iter().find(|d| d.agent == id).map(|d| d.action.as_str());
+    let (strategy, risk, execution) =
+        (action_of("strategy"), action_of("risk"), action_of("execution"));
+    if strategy != Some("buy") && strategy != Some("sell") {
+        return format!("tick hold: strategy={}", strategy.unwrap_or("?"));
+    }
+    if risk != Some("approve") || execution == Some("hold") {
+        return format!(
+            "tick blocked: strategy={} risk={}",
+            strategy.unwrap_or("?"),
+            risk.unwrap_or("?")
+        );
+    }
+    let side = strategy.unwrap_or("hold");
+    if last_side(&state.pool, tenant_id, SYMBOL).await.as_deref() == Some(side) {
+        return format!("tick skipped: already positioned {side}");
+    }
+    let price = match closes.last().copied() {
+        Some(p) if p.is_finite() && p > 0.0 => p,
+        _ => return "tick skipped: no price to trade".to_string(),
+    };
+    let qty = TARGET_NOTIONAL / price;
+    let slot = chrono::Utc::now().timestamp() / scheduler_interval_secs() as i64;
+    let key = format!("sched-{side}-{SYMBOL}-{slot}");
+    match crate::orders::place_paper_order(
+        &state.pool,
+        tenant_id,
+        "coinbase",
+        SYMBOL,
+        side,
+        qty,
+        price,
+        Some(&key),
+    )
+    .await
+    {
+        Ok(order) => format!("tick placed {side} {} @ {:.2} (id {})", order.qty, order.price, order.id),
+        Err((status, msg)) => format!("tick order rejected ({status}): {msg}"),
+    }
+}
+
+/// Spawn the autonomous loop. Returns immediately; the loop logs one
+/// line per tick and never brings the server down.
+pub fn spawn(state: AppState) {
+    tokio::spawn(async move {
+        let every = scheduler_interval_secs();
+        tracing::info!("scheduler on: BTC-USD every {every}s (paper only)");
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(every)).await;
+            let summary = tick(&state).await;
+            tracing::info!("scheduler: {summary}");
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interval_defaults_and_clamps() {
+        std::env::remove_var("SCHEDULER_INTERVAL_SECS");
+        assert_eq!(scheduler_interval_secs(), 300);
+        std::env::set_var("SCHEDULER_INTERVAL_SECS", "10");
+        assert_eq!(scheduler_interval_secs(), 300, "below minimum clamps to default");
+        std::env::set_var("SCHEDULER_INTERVAL_SECS", "60");
+        assert_eq!(scheduler_interval_secs(), 60);
+        std::env::remove_var("SCHEDULER_INTERVAL_SECS");
+    }
+
+    #[test]
+    fn enabled_defaults_true() {
+        std::env::remove_var("SCHEDULER_ENABLED");
+        assert!(scheduler_enabled());
+        std::env::set_var("SCHEDULER_ENABLED", "false");
+        assert!(!scheduler_enabled());
+        std::env::remove_var("SCHEDULER_ENABLED");
+    }
+
+    #[tokio::test]
+    async fn tick_without_db_skips() {
+        let state = AppState {
+            pool: sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/none")
+                .expect("test lazy pool"),
+            jwt_secret: "test".to_string(),
+        };
+        let summary = tick(&state).await;
+        assert!(
+            summary.contains("skipped") || summary.contains("degraded"),
+            "tick must degrade without DB, got {summary:?}"
+        );
+    }
+}

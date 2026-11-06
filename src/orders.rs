@@ -96,9 +96,77 @@ pub async fn orders_handler(
     }
 }
 
+/// Validate via the risk engine then persist a paper order for `tenant_id`.
+///
+/// Shared by [`create_order_handler`] (user-driven) and the autonomous
+/// scheduler (signal-driven): same gate, same insert, same `201` shape
+/// on success. `idempotency_key` should always be set by callers; a
+/// duplicate key surfaces as a unique violation from Postgres.
+pub async fn place_paper_order(
+    pool: &sqlx::PgPool,
+    tenant_id: uuid::Uuid,
+    exchange: &str,
+    symbol: &str,
+    side: &str,
+    qty: f64,
+    price: f64,
+    idempotency_key: Option<&str>,
+) -> Result<PaperOrder, (StatusCode, String)> {
+    let intent = OrderIntent {
+        symbol: symbol.to_string(),
+        side: side.to_string(),
+        qty,
+        price,
+    };
+    // Risk gate: per-tenant limits from Postgres (conservative fallback
+    // when unreadable). The engine never writes limits; agents have no path
+    // to change them.
+    let limits = load_limits(pool, tenant_id).await;
+    check_order(&limits, &intent)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let row = sqlx::query(
+        "INSERT INTO paper_orders (tenant_id, exchange, symbol, side, qty, price, status, idempotency_key)
+         VALUES ($1, $2, $3, $4, $5, $6, 'filled', $7)
+         RETURNING id::TEXT AS id, exchange, symbol, side, qty, price, status, created_at",
+    )
+    .bind(tenant_id)
+    .bind(exchange)
+    .bind(symbol)
+    .bind(side)
+    .bind(qty)
+    .bind(price)
+    .bind(idempotency_key)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        if let Some(db) = e.as_database_error() {
+            if db.is_unique_violation() {
+                return (StatusCode::CONFLICT, "duplicate idempotency_key".to_string());
+            }
+        }
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("insert failed: {e}"))
+    })?;
+
+    use sqlx::Row;
+    Ok(PaperOrder {
+        id: row.try_get("id").unwrap_or_default(),
+        exchange: row.try_get("exchange").unwrap_or_else(|_| "paper".to_string()),
+        symbol: row.try_get("symbol").unwrap_or_default(),
+        side: row.try_get("side").unwrap_or_default(),
+        qty: row.try_get("qty").unwrap_or_default(),
+        price: row.try_get("price").unwrap_or_default(),
+        status: row.try_get("status").unwrap_or_else(|_| "filled".to_string()),
+        created_at: row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default(),
+    })
+}
+
 /// Validate via the risk engine then persist a paper order for the authenticated tenant.
 ///
-/// Requires `Authorization: Bearer <JWT>` via [`Tenant`].
+/// Requires `Authorization: Bearer *** via [`Tenant`].
 /// Rejections from [`check_order`] become `400`; DB failures become `500`.
 /// Success returns `201` with the persisted order.
 pub async fn create_order_handler(
@@ -114,56 +182,17 @@ pub async fn create_order_handler(
     if side != "buy" && side != "sell" {
         return Err((StatusCode::BAD_REQUEST, "side must be buy or sell".to_string()));
     }
-    let intent = OrderIntent {
-        symbol: req.symbol.clone(),
-        side: side.clone(),
-        qty: req.qty,
-        price: req.price,
-    };
-    // Risk gate: per-tenant limits from Postgres (conservative fallback
-    // when unreadable). The engine never writes limits; agents have no path
-    // to change them.
-    let limits = load_limits(&state.pool, tenant_id).await;
-    check_order(&limits, &intent)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-
-    let row = sqlx::query(
-        "INSERT INTO paper_orders (tenant_id, exchange, symbol, side, qty, price, status, idempotency_key)
-         VALUES ($1, $2, $3, $4, $5, $6, 'filled', $7)
-         RETURNING id::TEXT AS id, exchange, symbol, side, qty, price, status, created_at",
+    let order = place_paper_order(
+        &state.pool,
+        tenant_id,
+        &req.exchange,
+        &req.symbol,
+        &side,
+        req.qty,
+        req.price,
+        req.idempotency_key.as_deref(),
     )
-    .bind(tenant_id)
-    .bind(&req.exchange)
-    .bind(&req.symbol)
-    .bind(&side)
-    .bind(req.qty)
-    .bind(req.price)
-    .bind(&req.idempotency_key)
-    .fetch_one(&state.pool)
-    .await
-    .map_err(|e| {
-        if let Some(db) = e.as_database_error() {
-            if db.is_unique_violation() {
-                return (StatusCode::CONFLICT, "duplicate idempotency_key".to_string());
-            }
-        }
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("insert failed: {e}"))
-    })?;
-
-    use sqlx::Row;
-    let order = PaperOrder {
-        id: row.try_get("id").unwrap_or_default(),
-        exchange: row.try_get("exchange").unwrap_or_else(|_| "paper".to_string()),
-        symbol: row.try_get("symbol").unwrap_or_default(),
-        side: row.try_get("side").unwrap_or_default(),
-        qty: row.try_get("qty").unwrap_or_default(),
-        price: row.try_get("price").unwrap_or_default(),
-        status: row.try_get("status").unwrap_or_else(|_| "filled".to_string()),
-        created_at: row
-            .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_default(),
-    };
+    .await?;
     Ok((StatusCode::CREATED, Json(order)))
 }
 
