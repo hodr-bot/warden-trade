@@ -18,15 +18,18 @@ impl AppState {
     ///
     /// Reads `DATABASE_URL`, `JWT_SECRET` and `BIND_ADDR`.
     /// Returns the state plus the bind address to listen on.
-    pub async fn from_env() -> Result<(Self, String), sqlx::Error> {
+    /// The pool connects lazily: no database traffic happens until the
+    /// first query, so the server boots even when Postgres is down
+    /// (DB-backed routes then fall back to empty results and log why).
+    pub fn from_env() -> (Self, String) {
         let database_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://warden:warden@localhost:5432/warden_trade".to_string());
         let jwt_secret = std::env::var("JWT_SECRET")
             .unwrap_or_else(|_| "dev-placeholder-change-me".to_string());
         let bind_addr = std::env::var("BIND_ADDR")
             .unwrap_or_else(|_| "127.0.0.1:3000".to_string());
-        let pool = PgPool::connect(&database_url).await?;
-        Ok((Self { pool, jwt_secret }, bind_addr))
+        let pool = PgPool::connect_lazy(&database_url).expect("DATABASE_URL invalide");
+        (Self { pool, jwt_secret }, bind_addr)
     }
 }
 

@@ -27,6 +27,10 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
+    let (state, addr) = state::AppState::from_env();
+    if let Err(e) = sqlx::migrate!("./migrations").run(&state.pool).await {
+        tracing::warn!("migrations not applied, running degraded: {e}");
+    }
     let app = Router::new()
         .route("/health", get(health))
         .route("/", get(dashboard::dashboard_handler))
@@ -35,8 +39,8 @@ async fn main() {
         .route("/api/agents", get(orchestrator::agents_handler))
         .route("/api/autonomy", get(autonomy::autonomy_handler))
         .route("/api/admin/tenants", get(admin::admin_tenants_handler))
-        .nest_service("/static", ServeDir::new("static"));
-    let addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+        .nest_service("/static", ServeDir::new("static"))
+        .with_state(state);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     tracing::info!("listening on {addr}");
     axum::serve(listener, app).await.unwrap();
