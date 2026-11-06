@@ -7,6 +7,7 @@ mod coinbase;
 mod dashboard;
 mod exchanges;
 mod kraken;
+mod markets;
 mod state;
 
 async fn health() -> &'static str {
@@ -21,6 +22,7 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(health))
         .route("/", get(dashboard::dashboard_handler))
+        .route("/api/markets", get(markets::markets_handler))
         .nest_service("/static", ServeDir::new("static"));
     let addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
