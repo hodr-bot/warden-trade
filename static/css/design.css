@@ -1021,6 +1021,51 @@ textarea.input {
   }
 }
 
+/* --------------------------------------------------------------------------
+   10. Live refresh (sobre) : pastille live, fondu au swap, entrée des cartes
+   -------------------------------------------------------------------------- */
+.live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--text);
+}
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  animation: live-pulse 2.4s ease-in-out infinite;
+}
+@keyframes live-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(79, 191, 134, 0.45); }
+  50% { box-shadow: 0 0 0 5px rgba(79, 191, 134, 0); }
+}
+
+/* htmx pose .htmx-settling sur la cible pendant le swap : fondu bref */
+.htmx-settling {
+  animation: settle-fade 0.22s ease;
+}
+@keyframes settle-fade {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
+
+/* Entrée initiale des cartes, en cascade légère (6 max) */
+.cards > .card {
+  animation: card-rise 0.35s ease both;
+}
+.cards > .card:nth-child(2) { animation-delay: 0.04s; }
+.cards > .card:nth-child(3) { animation-delay: 0.08s; }
+.cards > .card:nth-child(4) { animation-delay: 0.12s; }
+.cards > .card:nth-child(5) { animation-delay: 0.16s; }
+.cards > .card:nth-child(6) { animation-delay: 0.2s; }
+@keyframes card-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

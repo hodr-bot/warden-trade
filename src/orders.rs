@@ -244,7 +244,7 @@ pub async fn orders_page_handler(
     };
     let template = OrdersTemplate {
         orders,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: crate::dashboard::short_now(),
     };
     axum::response::Html(template.render().unwrap_or_default())
 }

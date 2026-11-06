@@ -24,7 +24,7 @@
     <div class="section-head">
       <div>
         <h1>Orders</h1>
-        <p>Persisted paper orders, newest first. <span class="muted">Generated at {{ generated_at }}</span></p>
+        <p>Persisted paper orders, newest first. <span class="live-badge"><span class="live-dot" aria-hidden="true"></span>Live</span> <span class="muted">· updated {{ generated_at }}</span></p>
       </div>
       <button
         class="btn btn-secondary btn-sm"
@@ -32,6 +32,7 @@
         hx-target="#orders"
         hx-swap="outerHTML"
         hx-select="#orders"
+        hx-trigger="click, every 30s"
       >Refresh</button>
     </div>
 

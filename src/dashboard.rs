@@ -204,6 +204,14 @@ fn fifo_pnl(fills: &[(String, f64, f64)]) -> (f64, usize, usize, f64, f64) {
     (realized, closed, wins, net, avg)
 }
 
+/// Short backend timestamp for "updated …" labels: `HH:MM:SS UTC`.
+///
+/// Full RFC3339 belongs in JSON APIs; human pages get the short form.
+/// Timezone is always UTC (server time): the label says so.
+pub fn short_now() -> String {
+    chrono::Utc::now().format("%H:%M:%S UTC").to_string()
+}
+
 /// Pure valuation: per-symbol FIFO + per-symbol marks.
 ///
 /// `marks` maps symbol → current price. Symbols without a mark (feed down)
@@ -314,7 +322,7 @@ pub async fn dashboard_handler(State(state): State<AppState>) -> axum::response:
         } else {
             format!("{}%", wins * 100 / closed)
         },
-        generated_at: Utc::now().to_rfc3339(),
+        generated_at: short_now(),
         signals,
     };
     axum::response::Html(template.render().unwrap_or_default())
@@ -354,6 +362,13 @@ mod tests {
         assert_eq!(realized, 10.0);
         assert_eq!((closed, wins), (1, 1));
         assert_eq!(net, 0.0);
+    }
+
+    #[test]
+    fn short_now_is_a_short_utc_label() {
+        let s = short_now();
+        assert!(s.len() == "22:31:44 UTC".len(), "short_now={s}");
+        assert!(s.ends_with(" UTC"), "short_now={s}");
     }
 
     #[test]

@@ -102,7 +102,7 @@ pub async fn markets_page_handler() -> axum::response::Html<String> {
     let snapshots = fetch_live().await;
     let template = MarketsTemplate {
         snapshots,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: crate::dashboard::short_now(),
     };
     axum::response::Html(template.render().unwrap_or_default())
 }
