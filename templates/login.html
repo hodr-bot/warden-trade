@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Warden Trade — Login</title>
+  {% include "_style.html" %}
+  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+</head>
+<body class="page">
+  <nav class="nav" aria-label="Primary">
+    <div class="nav-inner">
+      <a class="nav-brand" href="/"><span class="nav-brand-mark" aria-hidden="true"></span>Warden Trade</a>
+      <ul class="nav-links">
+        <li><a href="/">Dashboard</a></li>
+        <li><a href="/markets">Markets</a></li>
+        <li><a href="/orders">Orders</a></li>
+        <li><a href="/login" aria-current="page">Login</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <main class="main container" id="login">
+    <div class="section-head">
+      <div>
+        <h1>Login</h1>
+        <p>Solo-admin sign in. The token is kept in this browser only.</p>
+      </div>
+    </div>
+
+    <section class="section" aria-label="Sign in">
+      <form id="login-form" class="card" style="max-width: 420px;">
+        <div class="field">
+          <label for="login-email">Email</label>
+          <input class="input" id="login-email" name="email" type="email" autocomplete="username" value="admin@local" required />
+        </div>
+        <div class="field">
+          <label for="login-password">Password</label>
+          <input class="input" id="login-password" name="password" type="password" autocomplete="current-password" required />
+        </div>
+        <div id="login-error" class="alert alert-danger" role="alert" hidden></div>
+        <div id="login-ok" class="alert alert-success" role="status" hidden></div>
+        <button class="btn btn-primary btn-block" type="submit" id="login-submit">Sign in</button>
+      </form>
+    </section>
+  </main>
+<script>
+(function () {
+  var form = document.getElementById("login-form");
+  var err = document.getElementById("login-error");
+  var ok = document.getElementById("login-ok");
+  var btn = document.getElementById("login-submit");
+  var existing = null;
+  try { existing = localStorage.getItem("warden_token"); } catch (e) { existing = null; }
+  if (existing) {
+    ok.hidden = false;
+    ok.textContent = "Already signed in on this browser. Signing in again replaces the token.";
+  }
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    err.hidden = true;
+    ok.hidden = true;
+    btn.disabled = true;
+    var email = document.getElementById("login-email").value;
+    var password = document.getElementById("login-password").value;
+    fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: email, password: password })
+    }).then(function (resp) {
+      if (!resp.ok) { throw new Error(resp.status === 401 ? "Invalid email or password." : "Login failed (HTTP " + resp.status + ")."); }
+      return resp.json();
+    }).then(function (data) {
+      try { localStorage.setItem("warden_token", data.token); } catch (e) { throw new Error("This browser blocks local storage."); }
+      ok.hidden = false;
+      ok.textContent = "Signed in. Redirecting to orders…";
+      window.setTimeout(function () { window.location.href = "/orders"; }, 600);
+    }).catch(function (e) {
+      err.hidden = false;
+      err.textContent = e.message || "Login failed.";
+      btn.disabled = false;
+    });
+  });
+})();
+</script>
+</body>
+</html>

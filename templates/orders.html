@@ -14,6 +14,7 @@
       <ul class="nav-links">
         <li><a href="/">Dashboard</a></li>
         <li><a href="/markets">Markets</a></li>
+        <li><a href="/login">Login</a>
         <li><a href="/orders" aria-current="page">Orders</a></li>
       </ul>
     </div>
@@ -30,6 +31,7 @@
         hx-get="/orders"
         hx-target="#orders"
         hx-swap="outerHTML"
+        hx-select="#orders"
       >Refresh</button>
     </div>
 

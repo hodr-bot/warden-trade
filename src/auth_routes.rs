@@ -5,6 +5,7 @@
 //! auto-provisioned on first login using `ADMIN_EMAIL` / `ADMIN_PASSWORD`
 //! env (dev defaults, must be changed in production).
 
+use askama::Template;
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 
@@ -122,6 +123,33 @@ pub async fn login_handler(
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("jwt: {e}")))?;
     Ok(Json(LoginResponse { token }))
+}
+
+/// Server-rendered solo-admin login page.
+///
+/// Same-origin HTML shell; the form POSTs JSON to `/api/auth/login` via
+/// fetch and keeps the JWT in `localStorage` (never in a cookie, never
+/// in the URL). No secret is embedded in the page.
+#[derive(askama::Template)]
+#[template(path = "login.html")]
+pub struct LoginTemplate;
+
+/// `GET /login` renders the sign-in form.
+pub async fn login_page_handler() -> axum::response::Html<String> {
+    axum::response::Html(LoginTemplate.render().unwrap_or_default())
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn login_page_renders_form_without_db() {
+        let axum::response::Html(html) = login_page_handler().await;
+        assert!(html.contains("<form"), "login page must render a form, got {html:?}");
+        assert!(html.contains("/api/auth/login"), "form must target the login API");
+        assert!(html.contains("warden_token"), "page must store the JWT client-side");
+    }
 }
 
 #[cfg(test)]
