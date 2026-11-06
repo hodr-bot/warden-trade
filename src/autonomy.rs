@@ -4,6 +4,7 @@
 //! [`crate::backtest::run_backtest`] (wins / pnl) and [`validate_limits`]
 //! (risk-limits sanity check) into a single [`AutonomyReport`].
 
+use axum::Json;
 use serde::Serialize;
 
 /// Paper-only autonomy report (serializable value object).
@@ -64,6 +65,17 @@ pub fn run_paper_cycle(symbol: &str, strategy: &str, prices: &[f64]) -> Autonomy
         limits_ok: validate_limits(&default_limits),
         generated_at: "1970-01-01T00:00:00Z".to_string(),
     }
+}
+
+/// Axum handler returning a deterministic paper autonomy report as JSON.
+///
+/// Stub prices, paper only: no network, no secrets, no I/O.
+pub async fn autonomy_handler() -> Json<AutonomyReport> {
+    Json(run_paper_cycle(
+        "BTC-USD",
+        "stub",
+        &[100.0, 101.0, 100.5, 102.0],
+    ))
 }
 
 #[cfg(test)]

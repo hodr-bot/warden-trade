@@ -32,6 +32,7 @@ async fn main() {
         .route("/api/markets", get(markets::markets_handler))
         .route("/api/orders", get(orders::orders_handler))
         .route("/api/agents", get(orchestrator::agents_handler))
+        .route("/api/autonomy", get(autonomy::autonomy_handler))
         .nest_service("/static", ServeDir::new("static"));
     let addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
