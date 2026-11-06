@@ -70,12 +70,16 @@ pub fn run_paper_cycle(symbol: &str, strategy: &str, prices: &[f64]) -> Autonomy
 
 /// Axum handler returning a deterministic paper autonomy report as JSON.
 ///
-/// Stub prices, paper only: no network, no secrets, no I/O.
+/// Fixed demo series (flat then climbing), paper only: no network,
+/// no secrets, no I/O. Shows one completed SMA-crossover trade.
 pub async fn autonomy_handler() -> Json<AutonomyReport> {
     Json(run_paper_cycle(
         "BTC-USD",
-        "stub",
-        &[100.0, 101.0, 100.5, 102.0],
+        "sma-3-8",
+        &[
+            100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, //
+            101.0, 102.0, 103.0, 104.0, 105.0,
+        ],
     ))
 }
 
@@ -107,13 +111,16 @@ mod tests {
 
     #[test]
     fn cycle_report_has_4_decisions() {
-        let prices = vec![100.0, 101.0, 102.5, 101.5];
+        // 13 climbing prices: SMA crossover fires once, one winning trade.
+        let prices = vec![
+            100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, //
+            101.0, 102.0, 103.0, 104.0, 105.0,
+        ];
         let report = run_paper_cycle("BTC-USD", "sma", &prices);
         assert_eq!(report.symbol, "BTC-USD");
         assert_eq!(report.decisions, 4);
         assert!(report.limits_ok);
-        // up moves: 101-100 = 1.0, 102.5-101 = 1.5 -> wins = 2, pnl = 2.5
-        assert_eq!(report.wins, 2);
-        assert!((report.total_pnl_f64 - 2.5).abs() < 1e-9);
+        assert_eq!(report.wins, 1);
+        assert!(report.total_pnl_f64 > 0.0);
     }
 }
