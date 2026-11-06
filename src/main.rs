@@ -1,26 +1,13 @@
-use axum::{response::Html, routing::get, Router};
+use axum::{routing::get, Router};
+use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
 
 mod auth;
+mod dashboard;
 mod state;
 
 async fn health() -> &'static str {
     "ok"
-}
-
-async fn dashboard() -> Html<String> {
-    let now = chrono::Utc::now().to_rfc3339();
-    Html(format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Warden Trade</title></head>
-<body style="background:#0b0e14;color:#e6edf3;font-family:system-ui">
-<main style="max-width:960px;margin:40px auto;padding:0 20px">
-<h1>Warden Trade — Phase 1 bootstrap</h1>
-<p>Backend reachable. Timestamp: {now}</p>
-<p>Paper trading only. No real funds.</p>
-</main></body></html>"#
-    ))
 }
 
 #[tokio::main]
@@ -30,7 +17,8 @@ async fn main() {
         .init();
     let app = Router::new()
         .route("/health", get(health))
-        .route("/", get(dashboard));
+        .route("/", get(dashboard::dashboard_handler))
+        .nest_service("/static", ServeDir::new("static"));
     let addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     tracing::info!("listening on {addr}");
