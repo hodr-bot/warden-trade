@@ -40,6 +40,7 @@ async fn main() {
         .route("/orders", get(orders::orders_page_handler))
         .route("/api/markets", get(markets::markets_handler))
         .route("/api/orders", get(orders::orders_handler).post(orders::create_order_handler))
+        .route("/api/backtest", get(backtest::backtest_handler))
         .route("/api/auth/login", post(auth_routes::login_handler))
         .route("/api/reconcile", get(reconcile::reconcile_handler))
         .route("/api/agents", get(orchestrator::agents_handler))

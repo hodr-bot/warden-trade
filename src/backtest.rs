@@ -115,6 +115,73 @@ pub fn run_backtest(strategy: &str, prices: &[f64]) -> BacktestResult {
     }
 }
 
+/// Query params for the live backtest endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct BacktestQuery {
+    /// Product id, e.g. `"BTC-USD"`. Defaults to `"BTC-USD"`.
+    pub product: Option<String>,
+    /// Candle granularity in seconds (60/300/900/3600/21600/86400).
+    /// Defaults to `86400` (daily, ~300 days of history).
+    pub granularity: Option<u64>,
+}
+
+/// Live backtest report: real Exchange candles through the SMA engine.
+#[derive(Debug, serde::Serialize)]
+pub struct LiveBacktestReport {
+    pub product: String,
+    pub granularity: u64,
+    pub candles: usize,
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+    pub result: BacktestResult,
+    pub generated_at: String,
+}
+
+/// `GET /api/backtest`: fetch up to 300 real Coinbase Exchange candles
+/// (public, read-only, no auth) and run the SMA-crossover engine on the
+/// closes. Degrades to a zero-trade report when the feed is unreachable.
+pub async fn backtest_handler(
+    axum::extract::Query(query): axum::extract::Query<BacktestQuery>,
+) -> axum::Json<LiveBacktestReport> {
+    let product = query.product.unwrap_or_else(|| "BTC-USD".to_string());
+    let granularity = query.granularity.unwrap_or(86400);
+    let client = crate::coinbase::CoinbaseClient::new();
+    let (candles, from, to, result) = match client.fetch_candles(&product, granularity).await {
+        Ok(candles) => {
+            let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
+            let from = candles.first().map(|c| c.time);
+            let to = candles.last().map(|c| c.time);
+            let result = run_backtest("sma-3-8", &closes);
+            (candles.len(), from, to, result)
+        }
+        Err(e) => {
+            tracing::warn!("backtest feed degraded: {e}");
+            (
+                0,
+                None,
+                None,
+                BacktestResult {
+                    strategy: "sma-3-8".to_string(),
+                    trades: 0,
+                    wins: 0,
+                    total_pnl_f64: 0.0,
+                    max_drawdown_f64: 0.0,
+                    win_rate_f64: 0.0,
+                },
+            )
+        }
+    };
+    axum::Json(LiveBacktestReport {
+        product,
+        granularity,
+        candles,
+        from,
+        to,
+        result,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
