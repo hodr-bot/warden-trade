@@ -4,6 +4,7 @@ use tracing_subscriber::EnvFilter;
 
 mod auth;
 mod agents;
+mod backtest;
 mod coinbase;
 mod dashboard;
 mod exchanges;
