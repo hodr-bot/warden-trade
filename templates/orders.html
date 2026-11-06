@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Warden Trade — Orders</title>
+  <link rel="stylesheet" href="/static/css/design.css" />
+  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+</head>
+<body class="page">
+  <nav class="nav" aria-label="Primary">
+    <div class="nav-inner">
+      <a class="nav-brand" href="/"><span class="nav-brand-mark" aria-hidden="true"></span>Warden Trade</a>
+      <ul class="nav-links">
+        <li><a href="/">Dashboard</a></li>
+        <li><a href="/markets">Markets</a></li>
+        <li><a href="/orders" aria-current="page">Orders</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <main class="main container" id="orders">
+    <div class="section-head">
+      <div>
+        <h1>Orders</h1>
+        <p>Persisted paper orders, newest first. <span class="muted">Generated at {{ generated_at }}</span></p>
+      </div>
+      <button
+        class="btn btn-secondary btn-sm"
+        hx-get="/orders"
+        hx-target="#orders"
+        hx-swap="outerHTML"
+      >Refresh</button>
+    </div>
+
+    <section class="section" aria-label="Paper orders">
+      <table class="table">
+        <thead>
+          <tr><th>ID</th><th>Exchange</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Status</th><th>Created at</th></tr>
+        </thead>
+        <tbody>
+          {% for o in orders %}
+          <tr>
+            <td class="muted">{{ o.id }}</td>
+            <td>{{ o.exchange }}</td>
+            <td>{{ o.symbol }}</td>
+            <td>{{ o.side }}</td>
+            <td>{{ o.qty }}</td>
+            <td>{{ o.price }}</td>
+            <td>{{ o.status }}</td>
+            <td class="muted">{{ o.created_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p class="muted">Paper trading only. Orders are created via the JWT-gated POST /api/orders endpoint.</p>
+    </section>
+  </main>
+</body>
+</html>

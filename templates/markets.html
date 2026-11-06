@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Warden Trade — Markets</title>
+  <link rel="stylesheet" href="/static/css/design.css" />
+  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+</head>
+<body class="page">
+  <nav class="nav" aria-label="Primary">
+    <div class="nav-inner">
+      <a class="nav-brand" href="/"><span class="nav-brand-mark" aria-hidden="true"></span>Warden Trade</a>
+      <ul class="nav-links">
+        <li><a href="/">Dashboard</a></li>
+        <li><a href="/markets" aria-current="page">Markets</a></li>
+        <li><a href="/orders">Orders</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <main class="main container" id="markets">
+    <div class="section-head">
+      <div>
+        <h1>Markets</h1>
+        <p>Live public prices, read-only. <span class="muted">Generated at {{ generated_at }}</span></p>
+      </div>
+      <button
+        class="btn btn-secondary btn-sm"
+        hx-get="/markets"
+        hx-target="#markets"
+        hx-swap="outerHTML"
+      >Refresh</button>
+    </div>
+
+    <section class="section" aria-label="Live prices">
+      <table class="table">
+        <thead>
+          <tr><th>Exchange</th><th>Symbol</th><th>Price</th><th>Retrieved at</th></tr>
+        </thead>
+        <tbody>
+          {% for s in snapshots %}
+          <tr>
+            <td>{{ s.exchange }}</td>
+            <td>{{ s.symbol }}</td>
+            <td>{{ s.price_f64 }}</td>
+            <td class="muted">{{ s.retrieved_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p class="muted">Paper trading only. A price of 0 means that feed was unreachable and degraded.</p>
+    </section>
+  </main>
+</body>
+</html>

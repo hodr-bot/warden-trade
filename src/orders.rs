@@ -4,6 +4,7 @@
 //! `POST /api/orders` validates via [`crate::risk::check_order`] then persists.
 //! No network, no secrets beyond the server-side pool.
 
+use askama::Template;
 use axum::{extract::State, http::StatusCode, Json};
 use serde::Deserialize;
 
@@ -173,6 +174,59 @@ pub async fn create_order_handler(
     Ok((StatusCode::CREATED, Json(order)))
 }
 
+/// Askama template for the orders HTML page (same rows as the API).
+#[derive(Template)]
+#[template(path = "orders.html")]
+pub struct OrdersTemplate {
+    pub orders: Vec<PaperOrder>,
+    pub generated_at: String,
+}
+
+/// Server-rendered orders page for the solo-admin (all tenants, newest 100).
+///
+/// Same-origin HTML page, no JWT needed; the JSON API stays tenant-scoped
+/// behind [`Tenant`]. Falls back to an empty table when the database is
+/// unreachable.
+pub async fn orders_page_handler(
+    State(state): State<AppState>,
+) -> axum::response::Html<String> {
+    let rows = sqlx::query(
+        "SELECT id::TEXT AS id, exchange, symbol, side, qty, price, status, created_at
+         FROM paper_orders ORDER BY created_at DESC LIMIT 100",
+    )
+    .fetch_all(&state.pool)
+    .await;
+    let orders = match rows {
+        Ok(rows) => rows
+            .iter()
+            .map(|row| {
+                use sqlx::Row;
+                let created_at: chrono::DateTime<chrono::Utc> =
+                    row.try_get("created_at").unwrap_or_default();
+                PaperOrder {
+                    id: row.try_get("id").unwrap_or_default(),
+                    exchange: row.try_get("exchange").unwrap_or_else(|_| "paper".to_string()),
+                    symbol: row.try_get("symbol").unwrap_or_default(),
+                    side: row.try_get("side").unwrap_or_default(),
+                    qty: row.try_get("qty").unwrap_or(0.0),
+                    price: row.try_get("price").unwrap_or(0.0),
+                    status: row.try_get("status").unwrap_or_default(),
+                    created_at: created_at.to_rfc3339(),
+                }
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!("orders page degraded: {e}");
+            vec![]
+        }
+    };
+    let template = OrdersTemplate {
+        orders,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+    };
+    axum::response::Html(template.render().unwrap_or_default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +257,13 @@ mod tests {
         let bad = Tenant { tenant_id: "not-a-uuid".to_string(), user_id: "u".to_string() };
         let Json(orders) = orders_handler(bad, State(test_state_unreachable())).await;
         assert!(orders.is_empty());
+    }
+
+    #[tokio::test]
+    async fn orders_page_degrades_to_empty_table_without_db() {
+        let axum::response::Html(body) =
+            orders_page_handler(State(test_state_unreachable())).await;
+        assert!(body.contains("Orders"));
     }
 
     #[test]
