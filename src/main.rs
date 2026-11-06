@@ -4,6 +4,7 @@ use tracing_subscriber::EnvFilter;
 
 mod auth;
 mod dashboard;
+mod exchanges;
 mod state;
 
 async fn health() -> &'static str {
