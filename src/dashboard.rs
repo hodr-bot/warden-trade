@@ -47,10 +47,18 @@ fn fmt_money(v: f64) -> String {
     }
 }
 
-/// Paper account starting bank, USD. The dashboard "Capital total" is this
-/// bank plus lifetime P&L — never the open-positions value (that was the
-/// `0.78` bug: a near-empty book looked like a near-empty account).
-pub const PAPER_STARTING_CAPITAL_USD: f64 = 10_000.0;
+/// Paper account starting bank, USD. Read from `PAPER_STARTING_CAPITAL_USD`
+/// (default 50 — the owner's real test stake, Nov 2026). The dashboard
+/// "Capital total" is this bank plus lifetime P&L — never the open-positions
+/// value (that was the `0.78` bug: a near-empty book looked like a
+/// near-empty account).
+pub fn paper_starting_capital_usd() -> f64 {
+    std::env::var("PAPER_STARTING_CAPITAL_USD")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|v| *v > 0.0)
+        .unwrap_or(50.0)
+}
 
 /// USD amount with explicit `$` sign: `$+8.93`, `$-3.10`, `$0.00`.
 pub fn fmt_usd(v: f64) -> String {
@@ -306,7 +314,7 @@ pub async fn dashboard_handler(State(state): State<AppState>) -> axum::response:
     .unwrap_or_default();
     let eur = fetch_usd_eur().await;
     let total = realized + unrealized;
-    let capital = PAPER_STARTING_CAPITAL_USD + total;
+    let capital = paper_starting_capital_usd() + total;
     let template = DashboardTemplate {
         capital_total: fmt_usd(capital),
         capital_class: delta_class(total),
@@ -394,13 +402,15 @@ mod tests {
     fn capital_total_is_bank_plus_pnl_not_open_value() {
         // Regression test for the `0.78` bug: with no open position the old
         // code showed `0` (or the open value) instead of the account bank.
-        let bank = PAPER_STARTING_CAPITAL_USD;
-        assert_eq!(bank, 10_000.0);
-        let capital_flat = bank + 2.5 + 0.0;
-        assert_eq!(fmt_usd(capital_flat), "$+10002.50");
-        // Even deep in the red the bank dominates, never near zero.
-        let capital_red = bank + (-50.0) + (-10.0);
-        assert!(capital_red > 9_000.0);
+        // Env override wins, garbage falls back to the 50 default.
+        std::env::set_var("PAPER_STARTING_CAPITAL_USD", "200.0");
+        assert_eq!(paper_starting_capital_usd(), 200.0);
+        std::env::set_var("PAPER_STARTING_CAPITAL_USD", "nonsense");
+        assert_eq!(paper_starting_capital_usd(), 50.0);
+        std::env::remove_var("PAPER_STARTING_CAPITAL_USD");
+        assert_eq!(paper_starting_capital_usd(), 50.0);
+        let capital_flat = 50.0 + 2.5 + 0.0;
+        assert_eq!(fmt_usd(capital_flat), "$+52.50");
     }
 
     #[test]
