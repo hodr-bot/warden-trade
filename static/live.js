@@ -2,6 +2,10 @@
 // swaps never open a second stream). Updates price cells + portfolio cards
 // in place with a brief directional flash. If the stream drops, the 30s
 // HTMX polling keeps pages fresh — this script stays silent.
+//
+// NOTE: templates load this file with ?v=<release> because Cloudflare
+// caches /static/* at the edge. Bump the query string in dashboard.html,
+// markets.html and orders.html on every live.js change.
 (function () {
   if (window.__wardenLive) return;
   window.__wardenLive = true;
