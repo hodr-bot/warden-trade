@@ -11,69 +11,91 @@ pub struct MarketSnapshot {
     pub retrieved_at: String,
 }
 
-/// Build two stub snapshots with price 0 and current timestamp.
+/// One tracked asset on both public feeds: our symbol, Coinbase spot
+/// product, Kraken ticker pair.
+const ASSETS: [(&str, &str, &str); 3] = [
+    ("BTC-USD", "BTC-USD", "XBTUSD"),
+    ("ETH-USD", "ETH-USD", "ETHUSD"),
+    ("SOL-USD", "SOL-USD", "SOLUSD"),
+];
+
+/// Build stub snapshots (price 0) for every tracked asset.
 ///
 /// Paper trading only: no network calls, no secrets.
 /// Used as the degraded fallback when live feeds are unreachable.
 pub fn paper_snapshot() -> Vec<MarketSnapshot> {
     let retrieved_at = chrono::Utc::now().to_rfc3339();
-    vec![
-        MarketSnapshot {
+    let mut out = Vec::with_capacity(ASSETS.len() * 2);
+    for (symbol, _, krak) in ASSETS {
+        out.push(MarketSnapshot {
             exchange: "coinbase".to_string(),
-            symbol: "BTC-USD".to_string(),
+            symbol: symbol.to_string(),
             price_f64: 0.0,
             retrieved_at: retrieved_at.clone(),
-        },
-        MarketSnapshot {
+        });
+        out.push(MarketSnapshot {
             exchange: "kraken".to_string(),
-            symbol: "XBTUSD".to_string(),
+            symbol: krak.to_string(),
             price_f64: 0.0,
-            retrieved_at,
-        },
-    ]
+            retrieved_at: retrieved_at.clone(),
+        });
+    }
+    out
 }
 
 /// Fetch live public prices when reachable, degrading each leg to `0.0`.
 ///
-/// Shared by the JSON API and the HTML page: tries Coinbase `BTC-USD`
-/// spot and Kraken `XBTUSD` ticker concurrently (read-only, no auth,
+/// Shared by the JSON API and the HTML page: tries every tracked asset on
+/// Coinbase spot and Kraken ticker concurrently (read-only, no auth,
 /// no secrets). `retrieved_at` is always backend time.
+///
+/// Kraken legs additionally degrade to the live WS mark (when the feed
+/// task already learned it): REST and WS agree to the cent most of the
+/// time, and a WS mark beats a `0.0`.
 pub async fn fetch_live() -> Vec<MarketSnapshot> {
     let retrieved_at = chrono::Utc::now().to_rfc3339();
     let coinbase = crate::coinbase::CoinbaseClient::new();
     let kraken = crate::kraken::KrakenClient::new();
-    let (cb, kr) = tokio::join!(
+    let (cb_btc, cb_eth, cb_sol, kr_btc, kr_eth, kr_sol) = tokio::join!(
         coinbase.fetch_spot_price("BTC-USD"),
-        kraken.fetch_last_price("XBTUSD")
+        coinbase.fetch_spot_price("ETH-USD"),
+        coinbase.fetch_spot_price("SOL-USD"),
+        kraken.fetch_last_price("XBTUSD"),
+        kraken.fetch_last_price("ETHUSD"),
+        kraken.fetch_last_price("SOLUSD")
     );
-    let cb_price = match cb {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("coinbase feed degraded: {e}");
-            0.0
-        }
-    };
-    let kr_price = match kr {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("kraken feed degraded: {e}");
-            0.0
-        }
-    };
-    vec![
-        MarketSnapshot {
+    let cb = [cb_btc, cb_eth, cb_sol];
+    let kr = [kr_btc, kr_eth, kr_sol];
+    let mut out = Vec::with_capacity(ASSETS.len() * 2);
+    for (i, (symbol, _, krak)) in ASSETS.iter().enumerate() {
+        let cb_price = match &cb[i] {
+            Ok(p) => *p,
+            Err(e) => {
+                tracing::warn!("coinbase {symbol} degraded: {e}");
+                0.0
+            }
+        };
+        out.push(MarketSnapshot {
             exchange: "coinbase".to_string(),
-            symbol: "BTC-USD".to_string(),
+            symbol: symbol.to_string(),
             price_f64: cb_price,
             retrieved_at: retrieved_at.clone(),
-        },
-        MarketSnapshot {
+        });
+        let kr_price = match &kr[i] {
+            Ok(p) => *p,
+            Err(e) => {
+                tracing::warn!("kraken {krak} degraded: {e}");
+                crate::live::current_marks().get(*symbol).copied().unwrap_or(0.0)
+            }
+        };
+        out.push(MarketSnapshot {
             exchange: "kraken".to_string(),
-            symbol: "XBTUSD".to_string(),
+            symbol: krak.to_string(),
             price_f64: kr_price,
-            retrieved_at,
-        },
-    ]
+            retrieved_at: retrieved_at.clone(),
+        });
+    }
+    out
 }
 
 /// Axum handler returning live public prices when reachable.
@@ -112,14 +134,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_count_is_two() {
+    fn snapshot_covers_every_asset_on_both_feeds() {
         let snapshots = paper_snapshot();
-        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots.len(), ASSETS.len() * 2);
+        for (symbol, _, krak) in ASSETS {
+            assert!(snapshots.iter().any(|s| s.exchange == "coinbase" && s.symbol == symbol));
+            assert!(snapshots.iter().any(|s| s.exchange == "kraken" && s.symbol == krak));
+        }
     }
 
     #[tokio::test]
-    async fn handler_returns_two_entries() {
+    async fn handler_returns_every_asset_on_both_feeds() {
         let Json(snapshots) = markets_handler().await;
-        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots.len(), ASSETS.len() * 2);
     }
 }

@@ -54,12 +54,20 @@
       return;
     }
     // Marks -> every price cell for that symbol.
+    // Kraken REST pairs shown on /markets mirror our symbols 1:1.
+    var ALIAS = { "XBTUSD": "BTC-USD", "ETHUSD": "ETH-USD", "SOLUSD": "SOL-USD" };
     if (msg.marks) {
-      Object.keys(msg.marks).forEach(function (sym) {
-        var price = msg.marks[sym];
+      var paint = function (sym, price) {
         document.querySelectorAll('[data-mark="' + sym + '"]').forEach(function (el) {
           setText(el, fmt(price), price);
         });
+      };
+      Object.keys(msg.marks).forEach(function (sym) {
+        paint(sym, msg.marks[sym]);
+      });
+      Object.keys(ALIAS).forEach(function (krakenSym) {
+        var src = ALIAS[krakenSym];
+        if (msg.marks[src] !== undefined) paint(krakenSym, msg.marks[src]);
       });
     }
     // Portfolio block -> dashboard cards + detail table (server-formatted).
