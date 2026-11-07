@@ -256,10 +256,21 @@ pub fn value_positions(
 }
 
 /// Backend handler building the dashboard from live Postgres data.
-pub async fn dashboard_handler(State(state): State<AppState>) -> axum::response::Html<String> {
+///
+/// Requires login ([`AuthPage`] redirects browsers to `/login`) and scopes
+/// every query to the caller's tenant.
+pub async fn dashboard_handler(
+    page: crate::state::AuthPage,
+    State(state): State<AppState>,
+) -> axum::response::Html<String> {
+    let tenant_id: uuid::Uuid = match page.0.tenant_id.parse() {
+        Ok(id) => id,
+        Err(_) => return axum::response::Html("invalid tenant".to_string()),
+    };
     let fills: Vec<(String, String, f64, f64)> = sqlx::query_as(
-        "SELECT symbol, side, qty, price FROM paper_orders ORDER BY created_at ASC",
+        "SELECT symbol, side, qty, price FROM paper_orders WHERE tenant_id = $1 ORDER BY created_at ASC",
     )
+    .bind(tenant_id)
     .fetch_all(&state.pool)
     .await
     .unwrap_or_else(|e| {
@@ -296,8 +307,9 @@ pub async fn dashboard_handler(State(state): State<AppState>) -> axum::response:
     }
     let (realized, closed, wins, unrealized, _open_value) = value_positions(&by_symbol, &marks);
     let signals: Vec<String> = sqlx::query(
-        "SELECT agent, action, symbol FROM agent_decisions ORDER BY created_at DESC LIMIT 8",
+        "SELECT agent, action, symbol FROM agent_decisions WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 8",
     )
+    .bind(tenant_id)
     .fetch_all(&state.pool)
     .await
     .map(|rows| {
@@ -450,7 +462,11 @@ mod tests {
                 .expect("test lazy pool"),
             jwt_secret: "test".to_string(),
         };
-        let axum::response::Html(body) = dashboard_handler(State(state)).await;
+        let page = crate::state::AuthPage(crate::state::Tenant {
+            tenant_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            user_id: "u".to_string(),
+        });
+        let axum::response::Html(body) = dashboard_handler(page, State(state)).await;
         assert!(body.contains("Warden"));
     }
 }

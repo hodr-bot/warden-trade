@@ -16,7 +16,8 @@ fn admin_email() -> String {
 }
 
 fn admin_password() -> String {
-    std::env::var("ADMIN_PASSWORD").unwrap_or_else(|_| "change-me-admin-123".to_string())
+    std::env::var("ADMIN_PASSWORD")
+        .expect("ADMIN_PASSWORD must be set: refusing to auto-provision admin with a public default")
 }
 
 /// Incoming login body.
@@ -36,10 +37,15 @@ pub struct LoginResponse {
 ///
 /// Auto-provisions the `solo-admin` tenant and admin user on first use.
 /// Wrong credentials become `401`; DB failures become `503`.
+///
+/// The JWT is returned BOTH as JSON (API clients) and as an HttpOnly
+/// `warden_token` cookie (browser: navigations, HTMX, EventSource send
+/// no Authorization header). `Secure` because the site is HTTPS-only;
+/// `SameSite=Lax` so top-level navigation to `/` after login carries it.
 pub async fn login_handler(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, (StatusCode, String)> {
+) -> Result<(axum::http::HeaderMap, Json<LoginResponse>), (StatusCode, String)> {
     let email = req.email.trim().to_ascii_lowercase();
     if email.is_empty() || req.password.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "email and password required".to_string()));
@@ -122,14 +128,23 @@ pub async fn login_handler(
         state.jwt_secret.as_bytes(),
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("jwt: {e}")))?;
-    Ok(Json(LoginResponse { token }))
+    let mut headers = axum::http::HeaderMap::new();
+    let cookie = format!(
+        "{}={token}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax",
+        crate::state::SESSION_COOKIE
+    );
+    if let Ok(value) = cookie.parse() {
+        headers.insert(axum::http::header::SET_COOKIE, value);
+    }
+    Ok((headers, Json(LoginResponse { token })))
 }
 
 /// Server-rendered solo-admin login page.
 ///
-/// Same-origin HTML shell; the form POSTs JSON to `/api/auth/login` via
-/// fetch and keeps the JWT in `localStorage` (never in a cookie, never
-/// in the URL). No secret is embedded in the page.
+/// Same-origin HTML shell; the form POSTs JSON to `/api/auth/login` and
+/// the server sets the HttpOnly `warden_token` session cookie (plus the
+/// JSON token for API clients). No secret is embedded in the page and
+/// the browser stores nothing in `localStorage`.
 #[derive(askama::Template)]
 #[template(path = "login.html")]
 pub struct LoginTemplate;
@@ -148,7 +163,8 @@ mod page_tests {
         let axum::response::Html(html) = login_page_handler().await;
         assert!(html.contains("<form"), "login page must render a form, got {html:?}");
         assert!(html.contains("/api/auth/login"), "form must target the login API");
-        assert!(html.contains("warden_token"), "page must store the JWT client-side");
+        assert!(html.contains("window.location.href = \"/\""), "login must redirect to the dashboard");
+        assert!(!html.contains("localStorage"), "session must live in the HttpOnly cookie, not localStorage");
     }
 }
 

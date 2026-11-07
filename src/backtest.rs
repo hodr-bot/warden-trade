@@ -138,9 +138,10 @@ pub struct LiveBacktestReport {
 }
 
 /// `GET /api/backtest`: fetch up to 300 real Coinbase Exchange candles
-/// (public, read-only, no auth) and run the SMA-crossover engine on the
+/// (login required, read-only) and run the SMA-crossover engine on the
 /// closes. Degrades to a zero-trade report when the feed is unreachable.
 pub async fn backtest_handler(
+    _tenant: crate::state::Tenant,
     axum::extract::Query(query): axum::extract::Query<BacktestQuery>,
 ) -> axum::Json<LiveBacktestReport> {
     let product = query.product.unwrap_or_else(|| "BTC-USD".to_string());

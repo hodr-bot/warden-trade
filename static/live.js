@@ -46,6 +46,19 @@
     return; // no EventSource support: HTMX polling covers freshness
   }
 
+  es.onerror = function () {
+    // 401 (session expired / signed out) kills the stream server-side:
+    // EventSource would otherwise retry forever on an error page.
+    // A fetch probe distinguishes "logged out" (back to /login) from a
+    // transient drop (HTMX polling covers freshness meanwhile).
+    es.close();
+    fetch("/api/live/stream", { headers: { "Accept": "text/event-stream" } }).then(function (resp) {
+      if (resp.status === 401 && window.location.pathname !== "/login") {
+        window.location.href = "/login";
+      }
+    }).catch(function () { /* offline: stay, polling covers it */ });
+  };
+
   es.onmessage = function (ev) {
     var msg;
     try {

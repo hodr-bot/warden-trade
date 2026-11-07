@@ -72,7 +72,7 @@ pub fn run_paper_cycle(symbol: &str, strategy: &str, prices: &[f64]) -> Autonomy
 ///
 /// Fixed demo series (flat then climbing), paper only: no network,
 /// no secrets, no I/O. Shows one completed SMA-crossover trade.
-pub async fn autonomy_handler() -> Json<AutonomyReport> {
+pub async fn autonomy_handler(_tenant: crate::state::Tenant) -> Json<AutonomyReport> {
     Json(run_paper_cycle(
         "BTC-USD",
         "sma-3-8",

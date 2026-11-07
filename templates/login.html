@@ -38,11 +38,10 @@
   var err = document.getElementById("login-error");
   var ok = document.getElementById("login-ok");
   var btn = document.getElementById("login-submit");
-  var existing = null;
-  try { existing = localStorage.getItem("warden_token"); } catch (e) { existing = null; }
+  var existing = document.cookie.indexOf("warden_token=") !== -1;
   if (existing) {
     ok.hidden = false;
-    ok.textContent = "Already signed in on this browser. Signing in again replaces the token.";
+    ok.textContent = "Already signed in on this browser. Signing in again replaces the session.";
   }
   form.addEventListener("submit", function (ev) {
     ev.preventDefault();
@@ -59,10 +58,11 @@
       if (!resp.ok) { throw new Error(resp.status === 401 ? "Invalid email or password." : "Login failed (HTTP " + resp.status + ")."); }
       return resp.json();
     }).then(function (data) {
-      try { localStorage.setItem("warden_token", data.token); } catch (e) { throw new Error("This browser blocks local storage."); }
+      // Session cookie (HttpOnly) is set by the server on this response;
+      // nothing to store client-side. The token stays out of JS reach.
       ok.hidden = false;
-      ok.textContent = "Signed in. Redirecting to orders…";
-      window.setTimeout(function () { window.location.href = "/orders"; }, 600);
+      ok.textContent = "Signed in. Redirecting…";
+      window.setTimeout(function () { window.location.href = "/"; }, 600);
     }).catch(function (e) {
       err.hidden = false;
       err.textContent = e.message || "Login failed.";

@@ -122,12 +122,17 @@ pub fn spawn_feed() {
 }
 
 /// Portfolio block for the live snapshot, computed server-side from live
-/// fills + current marks. Mirrors the dashboard valuation (same FIFO,
-/// same public scope as `/`).
-async fn portfolio_json(pool: &sqlx::PgPool, marks: &BTreeMap<String, f64>) -> serde_json::Value {
+/// fills + current marks. Mirrors the dashboard valuation (same FIFO),
+/// scoped to the caller's tenant.
+async fn portfolio_json(
+    pool: &sqlx::PgPool,
+    tenant_id: uuid::Uuid,
+    marks: &BTreeMap<String, f64>,
+) -> serde_json::Value {
     let fills: Vec<(String, String, f64, f64)> = sqlx::query_as(
-        "SELECT symbol, side, qty, price FROM paper_orders ORDER BY created_at ASC",
+        "SELECT symbol, side, qty, price FROM paper_orders WHERE tenant_id = $1 ORDER BY created_at ASC",
     )
+    .bind(tenant_id)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
@@ -163,12 +168,15 @@ async fn portfolio_json(pool: &sqlx::PgPool, marks: &BTreeMap<String, f64>) -> s
 
 /// `GET /api/live/stream`: SSE snapshot every 2s (marks + portfolio).
 ///
-/// Same public scope as `/`: marks are public market data and the paper
-/// portfolio is already shown unauthenticated on the dashboard.
+/// Requires login ([`Tenant`]: Bearer or session cookie — EventSource
+/// sends the cookie automatically on same-origin). The portfolio block
+/// is scoped to the caller's tenant.
 pub async fn stream_handler(
+    tenant: crate::state::Tenant,
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
 ) -> axum::response::Sse<impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
     let pool = state.pool.clone();
+    let tenant_id: uuid::Uuid = tenant.tenant_id.parse().unwrap_or_else(|_| uuid::Uuid::nil());
     let stream = futures_util::stream::unfold(0u64, move |tick| {
         let pool = pool.clone();
         async move {
@@ -178,7 +186,7 @@ pub async fn stream_handler(
             let marks = current_marks();
             let data = serde_json::json!({
                 "marks": marks,
-                "portfolio": portfolio_json(&pool, &marks).await,
+                "portfolio": portfolio_json(&pool, tenant_id, &marks).await,
             });
             let event = axum::response::sse::Event::default().data(data.to_string());
             Some((Ok::<_, std::convert::Infallible>(event), tick + 1))

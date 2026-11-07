@@ -98,12 +98,13 @@ pub async fn fetch_live() -> Vec<MarketSnapshot> {
     out
 }
 
-/// Axum handler returning live public prices when reachable.
+/// Axum handler returning live prices when reachable.
 ///
-/// Tries Coinbase `BTC-USD` spot and Kraken `XBTUSD` ticker concurrently
-/// (read-only, no auth, no secrets). Any feed failure degrades that leg
-/// to `0.0` with a warning log; `retrieved_at` is always backend time.
-pub async fn markets_handler() -> Json<Vec<MarketSnapshot>> {
+/// Requires login ([`Tenant`]: Bearer header or session cookie). Tries
+/// Coinbase `BTC-USD` spot and Kraken `XBTUSD` ticker concurrently
+/// (read-only, no secrets). Any feed failure degrades that leg to `0.0`
+/// with a warning log; `retrieved_at` is always backend time.
+pub async fn markets_handler(_tenant: crate::state::Tenant) -> Json<Vec<MarketSnapshot>> {
     Json(fetch_live().await)
 }
 
@@ -117,10 +118,11 @@ pub struct MarketsTemplate {
 
 /// Server-rendered markets page: live prices in HTML, HTMX refresh.
 ///
-/// Public (same-origin solo-admin page); the JSON API stays JWT-gated
-/// where it needs tenant scope. Degrades to the zero-price stub table
-/// when both feeds are unreachable.
-pub async fn markets_page_handler() -> axum::response::Html<String> {
+/// Requires login ([`AuthPage`] redirects browsers to `/login`).
+/// Degrades to the zero-price stub table when both feeds are unreachable.
+pub async fn markets_page_handler(
+    _page: crate::state::AuthPage,
+) -> axum::response::Html<String> {
     let snapshots = fetch_live().await;
     let template = MarketsTemplate {
         snapshots,
@@ -145,7 +147,11 @@ mod tests {
 
     #[tokio::test]
     async fn handler_returns_every_asset_on_both_feeds() {
-        let Json(snapshots) = markets_handler().await;
+        let tenant = crate::state::Tenant {
+            tenant_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            user_id: "u".to_string(),
+        };
+        let Json(snapshots) = markets_handler(tenant).await;
         assert_eq!(snapshots.len(), ASSETS.len() * 2);
     }
 }

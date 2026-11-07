@@ -204,18 +204,23 @@ pub struct OrdersTemplate {
     pub generated_at: String,
 }
 
-/// Server-rendered orders page for the solo-admin (all tenants, newest 100).
+/// Server-rendered orders page, scoped to the caller's tenant.
 ///
-/// Same-origin HTML page, no JWT needed; the JSON API stays tenant-scoped
-/// behind [`Tenant`]. Falls back to an empty table when the database is
-/// unreachable.
+/// Requires login ([`AuthPage`] redirects browsers to `/login`).
+/// Falls back to an empty table when the database is unreachable.
 pub async fn orders_page_handler(
+    page: crate::state::AuthPage,
     State(state): State<AppState>,
 ) -> axum::response::Html<String> {
+    let tenant_id: uuid::Uuid = match page.0.tenant_id.parse() {
+        Ok(id) => id,
+        Err(_) => return axum::response::Html("invalid tenant".to_string()),
+    };
     let rows = sqlx::query(
         "SELECT id::TEXT AS id, exchange, symbol, side, qty, price, status, created_at
-         FROM paper_orders ORDER BY created_at DESC LIMIT 100",
+         FROM paper_orders WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 100",
     )
+    .bind(tenant_id)
     .fetch_all(&state.pool)
     .await;
     let orders = match rows {
@@ -283,8 +288,12 @@ mod tests {
 
     #[tokio::test]
     async fn orders_page_degrades_to_empty_table_without_db() {
+        let page = crate::state::AuthPage(crate::state::Tenant {
+            tenant_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            user_id: "u".to_string(),
+        });
         let axum::response::Html(body) =
-            orders_page_handler(State(test_state_unreachable())).await;
+            orders_page_handler(page, State(test_state_unreachable())).await;
         assert!(body.contains("Orders"));
     }
 

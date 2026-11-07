@@ -386,8 +386,9 @@ pub async fn live_closes() -> Result<Vec<f64>, String> {
 
 /// Axum handler returning this cycle's decisions for `BTC-USD` as JSON.
 ///
-/// Deterministic stub: no network, no secrets, no I/O.
-pub async fn agents_handler() -> Json<Vec<AgentDecision>> {
+/// Requires login ([`Tenant`]). Deterministic stub: no network, no
+/// secrets, no I/O.
+pub async fn agents_handler(_tenant: crate::state::Tenant) -> Json<Vec<AgentDecision>> {
     Json(run_cycle("BTC-USD"))
 }
 
@@ -545,7 +546,11 @@ mod tests {
 
     #[tokio::test]
     async fn handler_returns_8() {
-        let Json(decisions) = agents_handler().await;
+        let tenant = crate::state::Tenant {
+            tenant_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            user_id: "u".to_string(),
+        };
+        let Json(decisions) = agents_handler(tenant).await;
         assert_eq!(decisions.len(), 8, "handler must return 8 decisions");
         for d in &decisions {
             assert_eq!(d.symbol, "BTC-USD");
