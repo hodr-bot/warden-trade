@@ -6,6 +6,19 @@
   if (window.__wardenLive) return;
   window.__wardenLive = true;
 
+  // Logout button (nav, all authenticated pages): expire the session
+  // cookie server-side, then land on /login. Runs even if the live
+  // stream never connects.
+  var logout = document.getElementById("logout");
+  if (logout) {
+    logout.addEventListener("click", function () {
+      logout.disabled = true;
+      fetch("/api/auth/logout", { method: "POST" }).finally(function () {
+        window.location.href = "/login";
+      });
+    });
+  }
+
   function fmt(n) {
     return Number(n).toLocaleString("en-US", {
       minimumFractionDigits: 2,

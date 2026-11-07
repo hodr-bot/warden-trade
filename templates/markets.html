@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Warden Trade — Markets</title>
+  <title>Warden Trade - Markets</title>
   {% include "_style.html" %}
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
   <script src="/static/live.js" defer></script>
@@ -16,7 +16,7 @@
         <li><a href="/">Dashboard</a></li>
         <li><a href="/markets" aria-current="page">Markets</a></li>
         <li><a href="/orders">Orders</a></li>
-        <li><a href="/login">Login</a>
+        <li><button class="nav-logout" id="logout" type="button">Logout</button></li>
       </ul>
     </div>
   </nav>
@@ -25,7 +25,7 @@
     <div class="section-head">
       <div>
         <h1>Markets</h1>
-        <p>Live public prices, read-only. <span class="live-badge"><span class="live-dot" aria-hidden="true"></span>Live</span> <span class="muted">· updated {{ generated_at }}</span></p>
+        <p>Live prices, private to your session. <span class="live-badge"><span class="live-dot" aria-hidden="true"></span>Live</span> <span class="muted">· updated {{ generated_at }}</span></p>
       </div>
       <button
         class="btn btn-secondary btn-sm"
@@ -38,6 +38,7 @@
     </div>
 
     <section class="section" aria-label="Live prices">
+      <div class="table-wrap">
       <table class="table">
         <thead>
           <tr><th>Exchange</th><th>Symbol</th><th class="num">Price</th><th>Retrieved at</th></tr>
@@ -53,6 +54,7 @@
           {% endfor %}
         </tbody>
       </table>
+      </div>
       <p class="muted">Paper trading only. A price of 0 means that feed was unreachable and degraded.</p>
     </section>
   </main>

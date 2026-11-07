@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Warden Trade — Orders</title>
+  <title>Warden Trade - Orders</title>
   {% include "_style.html" %}
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
   <script src="/static/live.js" defer></script>
@@ -16,7 +16,7 @@
         <li><a href="/">Dashboard</a></li>
         <li><a href="/markets">Markets</a></li>
         <li><a href="/orders" aria-current="page">Orders</a></li>
-        <li><a href="/login">Login</a>
+        <li><button class="nav-logout" id="logout" type="button">Logout</button></li>
       </ul>
     </div>
   </nav>
@@ -38,6 +38,7 @@
     </div>
 
     <section class="section" aria-label="Paper orders">
+      <div class="table-wrap">
       <table class="table">
         <thead>
           <tr><th>ID</th><th>Exchange</th><th>Symbol</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th><th>Status</th><th>Created at</th></tr>
@@ -57,7 +58,8 @@
           {% endfor %}
         </tbody>
       </table>
-      <p class="muted">Paper trading only. Orders are created via the JWT-gated POST /api/orders endpoint.</p>
+      </div>
+      <p class="muted">Paper trading only. Orders are placed automatically by the scheduler under your session.</p>
     </section>
   </main>
 </body>

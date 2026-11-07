@@ -139,6 +139,23 @@ pub async fn login_handler(
     Ok((headers, Json(LoginResponse { token })))
 }
 
+/// `POST /api/auth/logout`: expire the `warden_token` session cookie.
+///
+/// Deliberately unauthenticated: the holder of an expired token must
+/// still be able to sign out. Returns `200 {"ok": true}` with the
+/// expired cookie.
+pub async fn logout_handler() -> (axum::http::HeaderMap, Json<serde_json::Value>) {
+    let mut headers = axum::http::HeaderMap::new();
+    let cookie = format!(
+        "{}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax",
+        crate::state::SESSION_COOKIE
+    );
+    if let Ok(value) = cookie.parse() {
+        headers.insert(axum::http::header::SET_COOKIE, value);
+    }
+    (headers, Json(serde_json::json!({"ok": true})))
+}
+
 /// Server-rendered solo-admin login page.
 ///
 /// Same-origin HTML shell; the form POSTs JSON to `/api/auth/login` and
@@ -157,6 +174,21 @@ pub async fn login_page_handler() -> axum::response::Html<String> {
 #[cfg(test)]
 mod page_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn logout_expires_session_cookie() {
+        let (headers, Json(body)) = logout_handler().await;
+        assert_eq!(body, serde_json::json!({"ok": true}));
+        let set_cookie = headers
+            .get(axum::http::header::SET_COOKIE)
+            .expect("logout must expire the cookie")
+            .to_str()
+            .expect("cookie must be ASCII")
+            .to_string();
+        assert!(set_cookie.starts_with("warden_token=;"), "must clear the value, got {set_cookie:?}");
+        assert!(set_cookie.contains("Max-Age=0"), "must expire immediately, got {set_cookie:?}");
+        assert!(set_cookie.contains("HttpOnly"), "must stay JS-invisible, got {set_cookie:?}");
+    }
 
     #[tokio::test]
     async fn login_page_renders_form_without_db() {

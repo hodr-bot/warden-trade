@@ -264,6 +264,7 @@ pre {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--space-4);
   margin-bottom: var(--space-5);
 }
@@ -387,6 +388,29 @@ pre {
 }
 
 .nav-links a:focus-visible {
+  outline-offset: -4px;
+}
+
+/* Logout sits in the nav like a link, but it is a session action. */
+.nav-logout {
+  display: flex;
+  align-items: center;
+  padding-inline: var(--space-3);
+  background: none;
+  border: 0;
+  cursor: pointer;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  transition: color 0.12s ease;
+}
+
+.nav-logout:hover {
+  color: var(--text-strong);
+}
+
+.nav-logout:focus-visible {
   outline-offset: -4px;
 }
 
@@ -725,54 +749,7 @@ table.table {
 }
 
 /* --------------------------------------------------------------------------
-   9. Badges
-   -------------------------------------------------------------------------- */
-.badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-  color: var(--muted);
-  font-size: var(--fs-xs);
-  font-weight: 500;
-  line-height: 1.5;
-  white-space: nowrap;
-}
-
-.badge-success {
-  background: var(--success-bg);
-  border-color: var(--success-border);
-  color: var(--success);
-}
-
-.badge-warning {
-  background: var(--warning-bg);
-  border-color: var(--warning-border);
-  color: var(--warning);
-}
-
-.badge-danger {
-  background: var(--danger-bg);
-  border-color: var(--danger-border);
-  color: var(--danger-text);
-}
-
-.badge-info {
-  background: var(--info-bg);
-  border-color: var(--info-border);
-  color: var(--info);
-}
-
-.badge-accent {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-ink);
-}
-
-/* --------------------------------------------------------------------------
-   10. Empty, loading and error states
+   9. Empty, loading and error states
    Left-aligned and plain: say what happened, offer the next action.
    -------------------------------------------------------------------------- */
 .state {
@@ -874,7 +851,7 @@ table.table {
 }
 
 /* --------------------------------------------------------------------------
-   11. Forms and alerts
+   10. Forms and alerts
    -------------------------------------------------------------------------- */
 .field {
   display: flex;
@@ -905,7 +882,7 @@ textarea.input {
 }
 
 .input::placeholder {
-  color: var(--muted-soft);
+  color: var(--muted); /* 4.5:1+ on background; muted-soft stays border-only */
 }
 
 .input:hover {
@@ -916,6 +893,41 @@ textarea.input {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+/* Centered auth card (login): same tokens, no inline styles. */
+.auth-card {
+  max-width: 400px;
+  margin-inline: auto;
+  padding-top: var(--space-7);
+}
+
+.auth-head {
+  display: grid;
+  justify-items: center;
+  text-align: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-5);
+}
+
+.auth-logo {
+  width: 28px;
+  height: 28px;
+}
+
+.auth-brand {
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.auth-sub {
+  margin: 0;
+}
+
+.auth-foot {
+  text-align: center;
+  margin-top: var(--space-5);
+  font-size: var(--fs-xs);
 }
 
 .alert {
@@ -940,7 +952,7 @@ textarea.input {
 }
 
 /* --------------------------------------------------------------------------
-   12. Responsive
+   11. Responsive
    -------------------------------------------------------------------------- */
 @media (max-width: 1023px) {
   .layout {
@@ -979,6 +991,30 @@ textarea.input {
     padding-inline: var(--space-4);
   }
 
+  /* Sticky nav wraps instead of overflowing on narrow screens. */
+  .nav-inner {
+    height: auto;
+    min-height: var(--nav-height);
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-4);
+    padding-block: var(--space-2);
+  }
+
+  .nav-links {
+    flex-wrap: wrap;
+    row-gap: var(--space-1);
+  }
+
+  .nav-links a,
+  .nav-logout {
+    padding-block: var(--space-2);
+  }
+
+  /* One column: each metric breathes on a phone. */
+  .cards {
+    grid-template-columns: 1fr;
+  }
+
   .main {
     padding-block: var(--space-5) var(--space-6);
   }
@@ -1009,20 +1045,14 @@ textarea.input {
     right: var(--space-2);
   }
 
-  /* Wide tables scroll inside themselves, never the page */
-  .table {
-    display: block;
-    max-width: 100%;
-    overflow-x: auto;
-  }
-
+  /* Wide tables scroll inside .table-wrap, never the page. */
   .table td {
     white-space: nowrap;
   }
 }
 
 /* --------------------------------------------------------------------------
-   10. Live refresh (sobre) : pastille live, fondu au swap, entrée des cartes
+   12. Live refresh (sobre) : pastille live, fondu au swap, entrée des cartes
    -------------------------------------------------------------------------- */
 .live-badge {
   display: inline-flex;
