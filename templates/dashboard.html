@@ -42,8 +42,8 @@
       <div class="cards">
         <div class="card">
           <div class="card-eyebrow">Capital total</div>
-          <div class="card-metric">{{ capital_total }}</div>
-          <div class="card-footer"><span>Funded capital</span></div>
+          <div class="card-metric {{ capital_class }}" data-pf="capital">{{ capital_total }}</div>
+          <div class="card-footer"><span>Paper · started $10,000 · <span data-pf="capital_sub">{{ capital_sub }}</span></span></div>
         </div>
         <div class="card card-accent">
           <div class="card-eyebrow">Portfolio value</div>
@@ -85,7 +85,7 @@
             </tr>
           </thead>
           <tbody>
-            <tr><td>Capital total</td><td class="num">{{ capital_total }}</td></tr>
+            <tr><td>Capital total</td><td class="num {{ capital_class }}"><span data-pf="capital">{{ capital_total }}</span> <span class="muted" data-pf="capital_sub">{{ capital_sub }}</span></td></tr>
             <tr><td>Portfolio value</td><td class="num {{ portfolio_class }}"><span data-pf="value">{{ portfolio_value }}</span> <span class="muted" data-pf="value_sub">{{ portfolio_sub }}</span></td></tr>
             <tr><td>Realized PnL</td><td class="num {{ realized_class }}"><span data-pf="realized">{{ pnl_realized }}</span> <span class="muted" data-pf="realized_sub">{{ realized_sub }}</span></td></tr>
             <tr><td>Unrealized PnL</td><td class="num {{ unrealized_class }}"><span data-pf="unrealized">{{ pnl_unrealized }}</span> <span class="muted" data-pf="unrealized_sub">{{ unrealized_sub }}</span></td></tr>

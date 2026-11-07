@@ -142,7 +142,11 @@ async fn portfolio_json(pool: &sqlx::PgPool, marks: &BTreeMap<String, f64>) -> s
         crate::dashboard::value_positions(&by_symbol, marks);
     let eur_rate = crate::dashboard::fetch_usd_eur().await;
     let total = realized + unrealized;
+    let capital = crate::dashboard::PAPER_STARTING_CAPITAL_USD + total;
     serde_json::json!({
+        "capital": crate::dashboard::fmt_usd(capital),
+        "capital_sub": crate::dashboard::fmt_eur(capital, eur_rate),
+        "capital_class": crate::dashboard::delta_class(total),
         "value": crate::dashboard::fmt_usd(total),
         "value_sub": format!("Mark-to-market · {}", crate::dashboard::fmt_eur(total, eur_rate)),
         "class": crate::dashboard::delta_class(total),

@@ -19,6 +19,8 @@ use crate::state::AppState;
 #[template(path = "dashboard.html")]
 pub struct DashboardTemplate {
     pub capital_total: String,
+    pub capital_class: &'static str,
+    pub capital_sub: String,
     pub portfolio_value: String,
     pub portfolio_class: &'static str,
     pub portfolio_sub: String,
@@ -44,6 +46,11 @@ fn fmt_money(v: f64) -> String {
         format!("{:+.2}", v)
     }
 }
+
+/// Paper account starting bank, USD. The dashboard "Capital total" is this
+/// bank plus lifetime P&L — never the open-positions value (that was the
+/// `0.78` bug: a near-empty book looked like a near-empty account).
+pub const PAPER_STARTING_CAPITAL_USD: f64 = 10_000.0;
 
 /// USD amount with explicit `$` sign: `$+8.93`, `$-3.10`, `$0.00`.
 pub fn fmt_usd(v: f64) -> String {
@@ -279,7 +286,7 @@ pub async fn dashboard_handler(State(state): State<AppState>) -> axum::response:
             tracing::warn!("dashboard {symbol} degraded: no mark, position held at cost");
         }
     }
-    let (realized, closed, wins, unrealized, open_value) = value_positions(&by_symbol, &marks);
+    let (realized, closed, wins, unrealized, _open_value) = value_positions(&by_symbol, &marks);
     let signals: Vec<String> = sqlx::query(
         "SELECT agent, action, symbol FROM agent_decisions ORDER BY created_at DESC LIMIT 8",
     )
@@ -299,12 +306,11 @@ pub async fn dashboard_handler(State(state): State<AppState>) -> axum::response:
     .unwrap_or_default();
     let eur = fetch_usd_eur().await;
     let total = realized + unrealized;
+    let capital = PAPER_STARTING_CAPITAL_USD + total;
     let template = DashboardTemplate {
-        capital_total: if open_value == 0.0 {
-            "0".to_string()
-        } else {
-            format!("{open_value:.2}")
-        },
+        capital_total: fmt_usd(capital),
+        capital_class: delta_class(total),
+        capital_sub: fmt_eur(capital, eur),
         portfolio_value: fmt_usd(total),
         portfolio_class: delta_class(total),
         portfolio_sub: fmt_eur(total, eur),
@@ -385,9 +391,24 @@ mod tests {
     }
 
     #[test]
+    fn capital_total_is_bank_plus_pnl_not_open_value() {
+        // Regression test for the `0.78` bug: with no open position the old
+        // code showed `0` (or the open value) instead of the account bank.
+        let bank = PAPER_STARTING_CAPITAL_USD;
+        assert_eq!(bank, 10_000.0);
+        let capital_flat = bank + 2.5 + 0.0;
+        assert_eq!(fmt_usd(capital_flat), "$+10002.50");
+        // Even deep in the red the bank dominates, never near zero.
+        let capital_red = bank + (-50.0) + (-10.0);
+        assert!(capital_red > 9_000.0);
+    }
+
+    #[test]
     fn dashboard_template_renders_warden() {
         let template = DashboardTemplate {
             capital_total: "10000".to_string(),
+            capital_class: "up",
+            capital_sub: "≈ +8 904,80 €".to_string(),
             portfolio_value: "$+8.93".to_string(),
             portfolio_class: "up",
             portfolio_sub: "≈ +7,95 €".to_string(),

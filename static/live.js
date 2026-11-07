@@ -73,7 +73,8 @@
     // Portfolio block -> dashboard cards + detail table (server-formatted).
     var pf = msg.portfolio;
     if (pf) {
-      [["value", "value_sub", "class"],
+      [["capital", "capital_sub", "capital_class"],
+       ["value", "value_sub", "class"],
        ["realized", "realized_sub", "rclass"],
        ["unrealized", "unrealized_sub", "uclass"]
       ].forEach(function (keys) {
