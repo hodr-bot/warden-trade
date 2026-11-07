@@ -131,6 +131,38 @@
       {% endif %}
     </section>
 
+    <!-- LLM advisor (read-only counsel, never traded on) -->
+    <section class="section" aria-label="Advisor opinions">
+      <div class="section-head">
+        <div>
+          <h2>Advisor</h2>
+          <p>Experimental LLM counsel. Recorded, never executed.</p>
+        </div>
+      </div>
+      {% if opinions.is_empty() %}
+      <div class="state" role="status">
+        <div class="state-title">Advisor disabled</div>
+        <p>No API key configured. The bot trades on its own signals.</p>
+      </div>
+      {% else %}
+      <div class="table-wrap">
+        <table class="table">
+          <caption>Latest advisor opinions</caption>
+          <thead>
+            <tr>
+              <th scope="col">Opinion</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for o in opinions %}
+            <tr><td>{{ o }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+    </section>
+
     <!-- Empty block (only when there is no trade) -->
     {% if trades_count == "0" %}
     <div id="dashboard-empty" class="state" role="status">

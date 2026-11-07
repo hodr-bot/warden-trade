@@ -58,7 +58,7 @@ pub fn scheduler_symbols() -> Vec<String> {
 /// Oldest tenant id (solo-admin first). The scheduler trades for the
 /// tenant the login flow provisions; missing DB degrades to `None`
 /// (cycle skipped, retried next tick).
-async fn solo_tenant(pool: &sqlx::PgPool) -> Option<uuid::Uuid> {
+pub(crate) async fn solo_tenant(pool: &sqlx::PgPool) -> Option<uuid::Uuid> {
     let row: Option<(uuid::Uuid,)> =
         sqlx::query_as("SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1")
             .fetch_optional(pool)
@@ -112,6 +112,11 @@ pub async fn tick(state: &AppState) -> String {
     let mut summaries = Vec::new();
     for symbol in scheduler_symbols() {
         summaries.push(tick_symbol(state, tenant_id, &symbol, sentiment).await);
+    }
+    // Read-only counsel: one overdue symbol max, never consulted for orders.
+    // No-op without LLM_API_KEY + LLM_MODEL.
+    if let Some(note) = crate::advisor::tick_advisor(state).await {
+        summaries.push(note);
     }
     summaries.join(" | ")
 }

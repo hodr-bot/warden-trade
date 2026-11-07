@@ -37,6 +37,9 @@ pub struct DashboardTemplate {
     pub generated_at: String,
     /// Latest agent decisions, newest first (`agent:action symbol`).
     pub signals: Vec<String>,
+    /// Latest LLM advisor opinions, newest first
+    /// (`SYMBOL stance conf — rationale`), or empty when disabled.
+    pub opinions: Vec<String>,
 }
 
 fn fmt_money(v: f64) -> String {
@@ -327,6 +330,12 @@ pub async fn dashboard_handler(
     let eur = fetch_usd_eur().await;
     let total = realized + unrealized;
     let capital = paper_starting_capital_usd() + total;
+    // Read-only counsel: newest opinions for display only, never traded on.
+    let opinions: Vec<String> = crate::advisor::latest_opinions(&state.pool, tenant_id, 5)
+        .await
+        .iter()
+        .map(|o| format!("{} {} {:.2} — {}", o.symbol, o.stance, o.confidence, o.rationale))
+        .collect();
     let template = DashboardTemplate {
         capital_total: fmt_usd(capital),
         capital_class: delta_class(total),
@@ -350,6 +359,7 @@ pub async fn dashboard_handler(
         },
         generated_at: short_now(),
         signals,
+        opinions,
     };
     axum::response::Html(template.render().unwrap_or_default())
 }
@@ -446,6 +456,7 @@ mod tests {
             win_rate: "0%".to_string(),
             generated_at: "now".to_string(),
             signals: vec!["technical:buy BTC-USD".to_string()],
+            opinions: vec!["BTC-USD bullish 0.70 — ETF inflows persist.".to_string()],
         };
         let rendered = template.render().expect("template renders");
         assert!(
@@ -453,6 +464,10 @@ mod tests {
             "rendered dashboard should contain Warden"
         );
         assert!(rendered.contains("technical:buy"));
+        assert!(
+            rendered.contains("Advisor") && rendered.contains("bullish 0.70"),
+            "advisor opinions must render on the dashboard"
+        );
     }
 
     #[tokio::test]

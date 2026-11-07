@@ -167,6 +167,32 @@ pub async fn fetch_funding(base: &str) -> Option<f64> {
     body.get(0)?.get("fundingRate")?.as_str()?.parse().ok()
 }
 
+/// Fetch both feeds and return the freshest headlines (for the LLM advisor
+/// prompt). At most `max` titles, newest feed first. Empty on failure.
+/// Never panics, never logs secrets.
+pub async fn fetch_titles(max: usize) -> Vec<String> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent("warden-trade/rss")
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let mut out = Vec::new();
+    for url in FEEDS {
+        let Ok(resp) = http.get(*url).send().await else {
+            continue;
+        };
+        let Ok(body) = resp.text().await else {
+            continue;
+        };
+        out.extend(extract_titles(&body, MAX_TITLES));
+        if out.len() >= max {
+            break;
+        }
+    }
+    out.truncate(max);
+    out
+}
+
 /// Fetch both feeds and return the mean sentiment in `[-1.0, 1.0]`.
 ///
 /// Follows redirects, 15 s timeout per feed. A dead feed contributes

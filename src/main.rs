@@ -3,6 +3,7 @@ use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
 
 mod admin;
+mod advisor;
 mod auth;
 mod auth_routes;
 mod agents;
@@ -53,6 +54,7 @@ async fn main() {
         .route("/api/agents", get(orchestrator::agents_handler))
         .route("/api/agents/run", post(orchestrator::run_cycle_handler))
         .route("/api/autonomy", get(autonomy::autonomy_handler))
+        .route("/api/advisor", get(advisor::advisor_handler))
         .route("/api/live/status", get(kraken::live_status_handler))
         .route("/api/live/stream", get(live::stream_handler))
         .route("/api/admin/tenants", get(admin::admin_tenants_handler))
