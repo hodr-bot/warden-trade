@@ -33,8 +33,10 @@ pub const DEFAULT_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 /// same logical conversation.
 pub const ADVISOR_SESSION_ID: &str = "warden-trade-advisor-01";
 
-/// Hard cap on one advisor HTTP round-trip: the scheduler tick is 60 s.
-pub const ADVISOR_TIMEOUT_SECS: u64 = 20;
+/// Hard cap on one advisor HTTP round-trip. Measured 2-6 s warm, ~14 s
+/// cold: 20 s cut the very first call of a fresh process. 50 s keeps one
+/// slow counsel from stalling the 60 s scheduler for more than a tick.
+pub const ADVISOR_TIMEOUT_SECS: u64 = 50;
 
 /// Headlines quoted in the prompt (newest first, truncated per title).
 const PROMPT_MAX_TITLES: usize = 8;
