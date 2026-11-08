@@ -1,7 +1,7 @@
 //! Paper orders endpoint (paper only, Postgres-backed).
 //!
 //! `GET /api/orders` lists persisted paper orders.
-//! `POST /api/orders` validates via [`crate::risk::check_order`] then persists.
+//! `POST /api/orders` validates via [`crate::risk::check_order_full`] then persists.
 //! No network, no secrets beyond the server-side pool.
 
 use askama::Template;
@@ -9,7 +9,7 @@ use axum::{extract::State, http::StatusCode, Json};
 use serde::Deserialize;
 
 use crate::paper::PaperOrder;
-use crate::risk::{check_order, load_limits, OrderIntent};
+use crate::risk::{check_order, check_order_full, load_limits, OrderIntent};
 use crate::state::{AppState, Tenant};
 
 /// Incoming order request (JSON body for `POST /api/orders`).
@@ -122,7 +122,8 @@ pub async fn place_paper_order(
     // when unreadable). The engine never writes limits; agents have no path
     // to change them.
     let limits = load_limits(pool, tenant_id).await;
-    check_order(&limits, &intent)
+    check_order_full(pool, tenant_id, &limits, &intent)
+        .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let row = sqlx::query(
