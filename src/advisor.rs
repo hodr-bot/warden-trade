@@ -23,9 +23,15 @@ use std::time::Duration;
 
 use axum::Json;
 
-/// Default chat-completions endpoint (OpenRouter, OpenAI-compatible).
-/// Override with `LLM_BASE_URL` for another provider or proxy.
-pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
+/// Default chat-completions endpoint (OpenCode Go: spends the owner's Go
+/// quota, not API credits). Override with `LLM_BASE_URL` for another
+/// provider or proxy.
+pub const DEFAULT_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
+
+/// Stable session id required by the Go endpoint for routing and prompt
+/// caching. One per deployment is enough: all advisor calls belong to the
+/// same logical conversation.
+pub const ADVISOR_SESSION_ID: &str = "warden-trade-advisor-01";
 
 /// Hard cap on one advisor HTTP round-trip: the scheduler tick is 60 s.
 pub const ADVISOR_TIMEOUT_SECS: u64 = 20;
@@ -161,18 +167,22 @@ async fn request_opinion_with(key: &str, model: &str, base: &str, prompt: &str) 
     let url = format!("{}/chat/completions", base.trim_end_matches('/'));
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(ADVISOR_TIMEOUT_SECS))
-        .user_agent("warden-trade/advisor")
+        .user_agent("warden-trade-advisor/0.3.0")
         .build()
         .ok()?;
     let resp = http
         .post(&url)
         .header("Authorization", format!("Bearer {key}"))
+        .header("x-opencode-session", ADVISOR_SESSION_ID)
         .header("HTTP-Referer", "https://warden.djeel.org/")
         .header("X-Title", "Warden Trade paper advisor")
         .json(&serde_json::json!({
             "model": model,
             "temperature": 0,
-            "max_tokens": 300,
+            // Reasoning models spend most of the budget thinking: 300 caps
+            // the reply before it starts (finish_reason=length, null
+            // content). 2000 leaves room for ~1k reasoning + the JSON.
+            "max_tokens": 2000,
             "response_format": { "type": "json_object" },
             "messages": [
                 { "role": "system", "content": "You reply with JSON only. No markdown, no prose." },
