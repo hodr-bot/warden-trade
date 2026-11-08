@@ -45,6 +45,15 @@ pub struct DashboardTemplate {
     pub period_realized: String,
     /// Closing sells inside the period.
     pub period_trades: u32,
+    /// Watch-only real wallet: false until `WALLET_WATCH_ADDRESS` holds a
+    /// valid public address (never a seed phrase or secret key).
+    pub wallet_configured: bool,
+    /// Short address form (`AbC1…XyZ9`) or the setup hint.
+    pub wallet_label: String,
+    /// SOL balance (`12.5000 SOL`) or the current state (`unreachable`…).
+    pub wallet_sol: String,
+    /// `1.25 MINT…` lines, largest first, capped at fetch time.
+    pub wallet_tokens: Vec<String>,
     /// Latest agent decisions, newest first (`agent:action symbol`).
     pub signals: Vec<String>,
     /// Latest LLM advisor opinions, newest first
@@ -315,6 +324,55 @@ pub async fn dashboard_handler(
     let since_ts = crate::equity::range_start(range, now_ts);
     let (eq_points, eq_period, eq_trades) = crate::equity::equity_curve(&timed, since_ts);
     let eq_svg = crate::equity::equity_svg(&eq_points, since_ts, now_ts);
+    // Watch-only real wallet (public address, read-only, best effort).
+    let (wallet_configured, wallet_label, wallet_sol, wallet_tokens) =
+        match crate::wallet::watch_address() {
+            Some(addr) if crate::wallet::validate_watch_address(&addr).is_ok() => {
+                let http = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build();
+                match http {
+                    Ok(http) => {
+                        match crate::wallet::fetch_wallet(
+                            &http,
+                            &crate::wallet::rpc_url(),
+                            &addr,
+                        )
+                        .await
+                        {
+                            Ok(snap) => (
+                                true,
+                                crate::wallet::short_address(&addr),
+                                format!("{:.4} SOL", snap.sol),
+                                snap.tokens
+                                    .iter()
+                                    .map(|t| format!("{} {}", t.ui_amount, t.mint))
+                                    .collect(),
+                            ),
+                            Err(_) => (
+                                true,
+                                crate::wallet::short_address(&addr),
+                                "unreachable".to_string(),
+                                Vec::new(),
+                            ),
+                        }
+                    }
+                    Err(_) => (false, String::new(), "unreachable".to_string(), Vec::new()),
+                }
+            }
+            Some(_) => (
+                false,
+                "Invalid WALLET_WATCH_ADDRESS (not a public address)".to_string(),
+                String::new(),
+                Vec::new(),
+            ),
+            None => (
+                false,
+                "Set WALLET_WATCH_ADDRESS to your public address — never a seed phrase or private key".to_string(),
+                String::new(),
+                Vec::new(),
+            ),
+        };
     // One mark per held symbol: never value SOL at BTC's price.
     // Only symbols with a nonzero net position need a feed call.
     let mut held: Vec<String> = Vec::new();
@@ -389,6 +447,10 @@ pub async fn dashboard_handler(
         period_class: delta_class(eq_period),
         period_realized: fmt_usd(eq_period),
         period_trades: eq_trades,
+        wallet_configured,
+        wallet_label,
+        wallet_sol,
+        wallet_tokens,
         signals,
         opinions,
     };
@@ -491,6 +553,10 @@ mod tests {
             period_class: "",
             period_realized: "$0.00".to_string(),
             period_trades: 0,
+            wallet_configured: false,
+            wallet_label: "not configured".to_string(),
+            wallet_sol: String::new(),
+            wallet_tokens: Vec::new(),
             signals: vec!["technical:buy BTC-USD".to_string()],
             opinions: vec!["BTC-USD bullish 0.70 — ETF inflows persist.".to_string()],
         };

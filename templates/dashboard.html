@@ -156,6 +156,35 @@
       </div>
     </section>
 
+    <!-- Real wallet: watch-only, read-only, never a seed phrase -->
+    <section class="section" aria-label="Real wallet">
+      <div class="section-head">
+        <div>
+          <h2>Real wallet <span class="muted">· watch-only</span></h2>
+          <p>Public address, read-only. Paper trading is unaffected.</p>
+        </div>
+      </div>
+      {% if wallet_configured %}
+      <div class="cards">
+        <div class="card">
+          <div class="card-label">{{ wallet_label }}</div>
+          <div class="card-metric">{{ wallet_sol }}</div>
+        </div>
+        {% for t in wallet_tokens %}
+        <div class="card">
+          <div class="card-label">Token</div>
+          <div class="card-metric">{{ t }}</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="state" role="status">
+        <div class="state-title">No wallet watched</div>
+        <p>{{ wallet_label }}</p>
+      </div>
+      {% endif %}
+    </section>
+
     <!-- Latest agent signals -->
     <section class="section" aria-label="Latest agent signals">
       <div class="section-head">

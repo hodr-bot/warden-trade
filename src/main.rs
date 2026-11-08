@@ -16,6 +16,7 @@ mod exits;
 mod exchanges;
 mod kraken;
 mod live;
+mod livetrade;
 mod markets;
 mod news;
 mod orchestrator;
@@ -26,6 +27,7 @@ mod risk;
 mod scheduler;
 mod state;
 mod strategies;
+mod wallet;
 
 async fn health() -> &'static str {
     "ok"
