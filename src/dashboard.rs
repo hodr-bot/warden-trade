@@ -35,6 +35,16 @@ pub struct DashboardTemplate {
     pub drawdown: String,
     pub win_rate: String,
     pub generated_at: String,
+    /// Active timeline period id (`hour`/`day`/`week`/`month`/`all`).
+    pub range: String,
+    /// Inline SVG step-line of period realized PnL (server-rendered).
+    pub equity_svg: String,
+    /// `up`/`down`/`""` for the period number.
+    pub period_class: &'static str,
+    /// Formatted period realized PnL (`$+0.42`).
+    pub period_realized: String,
+    /// Closing sells inside the period.
+    pub period_trades: u32,
     /// Latest agent decisions, newest first (`agent:action symbol`).
     pub signals: Vec<String>,
     /// Latest LLM advisor opinions, newest first
@@ -258,6 +268,13 @@ pub fn value_positions(
     (realized, closed, wins, unrealized, open_value)
 }
 
+/// `GET /` query: timeline period tab. Missing or unknown falls back to
+/// `week` (see [`crate::equity::normalize_range`]).
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct DashboardQuery {
+    pub range: Option<String>,
+}
+
 /// Backend handler building the dashboard from live Postgres data.
 ///
 /// Requires login ([`AuthPage`] redirects browsers to `/login`) and scopes
@@ -265,13 +282,14 @@ pub fn value_positions(
 pub async fn dashboard_handler(
     page: crate::state::AuthPage,
     State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<DashboardQuery>,
 ) -> axum::response::Html<String> {
     let tenant_id: uuid::Uuid = match page.0.tenant_id.parse() {
         Ok(id) => id,
         Err(_) => return axum::response::Html("invalid tenant".to_string()),
     };
-    let fills: Vec<(String, String, f64, f64)> = sqlx::query_as(
-        "SELECT symbol, side, qty, price FROM paper_orders WHERE tenant_id = $1 ORDER BY created_at ASC",
+    let fills: Vec<(String, String, f64, f64, i64)> = sqlx::query_as(
+        "SELECT symbol, side, qty, price, extract(epoch FROM created_at)::BIGINT AS ts FROM paper_orders WHERE tenant_id = $1 ORDER BY created_at ASC",
     )
     .bind(tenant_id)
     .fetch_all(&state.pool)
@@ -283,12 +301,20 @@ pub async fn dashboard_handler(
     // FIFO per symbol (single-symbol today, grouped anyway).
     use std::collections::BTreeMap;
     let mut by_symbol: BTreeMap<String, Vec<(String, f64, f64)>> = BTreeMap::new();
-    for (symbol, side, qty, price) in &fills {
+    let mut timed: Vec<(String, String, f64, f64, i64)> = Vec::with_capacity(fills.len());
+    for (symbol, side, qty, price, ts) in &fills {
         by_symbol
             .entry(symbol.clone())
             .or_default()
             .push((side.clone(), *qty, *price));
+        timed.push((symbol.clone(), side.clone(), *qty, *price, *ts));
     }
+    // Timeline: period curve rebased at the active tab start.
+    let now_ts = chrono::Utc::now().timestamp();
+    let range = crate::equity::normalize_range(query.range.as_deref());
+    let since_ts = crate::equity::range_start(range, now_ts);
+    let (eq_points, eq_period, eq_trades) = crate::equity::equity_curve(&timed, since_ts);
+    let eq_svg = crate::equity::equity_svg(&eq_points, since_ts, now_ts);
     // One mark per held symbol: never value SOL at BTC's price.
     // Only symbols with a nonzero net position need a feed call.
     let mut held: Vec<String> = Vec::new();
@@ -358,6 +384,11 @@ pub async fn dashboard_handler(
             format!("{}%", wins * 100 / closed)
         },
         generated_at: short_now(),
+        range: range.to_string(),
+        equity_svg: eq_svg,
+        period_class: delta_class(eq_period),
+        period_realized: fmt_usd(eq_period),
+        period_trades: eq_trades,
         signals,
         opinions,
     };
@@ -455,6 +486,11 @@ mod tests {
             drawdown: "0%".to_string(),
             win_rate: "0%".to_string(),
             generated_at: "now".to_string(),
+            range: "week".to_string(),
+            equity_svg: String::new(),
+            period_class: "",
+            period_realized: "$0.00".to_string(),
+            period_trades: 0,
             signals: vec!["technical:buy BTC-USD".to_string()],
             opinions: vec!["BTC-USD bullish 0.70 — ETF inflows persist.".to_string()],
         };
@@ -481,7 +517,12 @@ mod tests {
             tenant_id: "00000000-0000-0000-0000-000000000001".to_string(),
             user_id: "u".to_string(),
         });
-        let axum::response::Html(body) = dashboard_handler(page, State(state)).await;
+        let axum::response::Html(body) = dashboard_handler(
+            page,
+            State(state),
+            axum::extract::Query(DashboardQuery { range: None }),
+        )
+        .await;
         assert!(body.contains("Warden"));
     }
 }

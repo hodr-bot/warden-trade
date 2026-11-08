@@ -99,6 +99,63 @@
       </div>
     </section>
 
+    <!-- Portfolio timeline: realized PnL per period (latents excluded) -->
+    <section class="section" aria-label="Portfolio timeline">
+      <div class="section-head">
+        <div>
+          <h2>Timeline</h2>
+          <p>Realized PnL earned inside the period. Latents excluded.</p>
+        </div>
+        <div class="tabs" role="group" aria-label="Timeline period">
+          <a href="/?range=hour"
+             hx-get="/?range=hour"
+             hx-target="#dashboard"
+             hx-swap="outerHTML"
+             hx-select="#dashboard"
+             class="tab{% if range == "hour" %} active{% endif %}"
+             {% if range == "hour" %}aria-current="true"{% endif %}>hour</a>
+          <a href="/?range=day"
+             hx-get="/?range=day"
+             hx-target="#dashboard"
+             hx-swap="outerHTML"
+             hx-select="#dashboard"
+             class="tab{% if range == "day" %} active{% endif %}"
+             {% if range == "day" %}aria-current="true"{% endif %}>day</a>
+          <a href="/?range=week"
+             hx-get="/?range=week"
+             hx-target="#dashboard"
+             hx-swap="outerHTML"
+             hx-select="#dashboard"
+             class="tab{% if range == "week" %} active{% endif %}"
+             {% if range == "week" %}aria-current="true"{% endif %}>week</a>
+          <a href="/?range=month"
+             hx-get="/?range=month"
+             hx-target="#dashboard"
+             hx-swap="outerHTML"
+             hx-select="#dashboard"
+             class="tab{% if range == "month" %} active{% endif %}"
+             {% if range == "month" %}aria-current="true"{% endif %}>month</a>
+          <a href="/?range=all"
+             hx-get="/?range=all"
+             hx-target="#dashboard"
+             hx-swap="outerHTML"
+             hx-select="#dashboard"
+             class="tab{% if range == "all" %} active{% endif %}"
+             {% if range == "all" %}aria-current="true"{% endif %}>all</a>
+        </div>
+      </div>
+      <div class="timeline">
+        <div class="timeline-head">
+          <span class="timeline-value {{ period_class }}">{{ period_realized }}</span>
+          <span class="muted">{{ period_trades }} closing trades</span>
+        </div>
+        <div class="timeline-chart {{ period_class }}">{{ equity_svg|safe }}</div>
+        {% if period_trades == 0 %}
+        <p class="muted">No closing trades in this period yet.</p>
+        {% endif %}
+      </div>
+    </section>
+
     <!-- Latest agent signals -->
     <section class="section" aria-label="Latest agent signals">
       <div class="section-head">

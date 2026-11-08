@@ -647,6 +647,92 @@ table.table {
 /* --------------------------------------------------------------------------
    8. Buttons
    -------------------------------------------------------------------------- */
+
+.tabs {
+  display: inline-flex;
+  gap: var(--space-1);
+  padding: 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.tab {
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.tab:hover {
+  color: var(--text-strong);
+}
+
+.tab.active {
+  background: var(--surface-3);
+  color: var(--text-strong);
+}
+
+/* --------------------------------------------------------------------------
+   8b. Timeline (portfolio realized-PnL curve, server-rendered SVG)
+   -------------------------------------------------------------------------- */
+
+.timeline-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.timeline-value {
+  font-size: var(--fs-metric);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+.timeline-value.up {
+  color: var(--success);
+}
+
+.timeline-value.down {
+  color: var(--danger-text);
+}
+
+.timeline-chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.timeline-chart .eq-line {
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
+.timeline-chart.up {
+  color: var(--success);
+}
+
+.timeline-chart.down {
+  color: var(--danger-text);
+}
+
+.timeline-chart .eq-zero {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+
+.timeline-chart .eq-dot {
+  fill: currentColor;
+}
+
+.timeline-chart .eq-label {
+  fill: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
 .btn {
   display: inline-flex;
   align-items: center;
