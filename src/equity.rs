@@ -97,6 +97,13 @@ pub fn equity_curve(
     (points, period, trades)
 }
 
+/// Short UTC label for a trade dot tooltip (`11-09 08:40 UTC`). Pure.
+fn fmt_point_ts(t: i64) -> String {
+    chrono::DateTime::from_timestamp(t, 0)
+        .map(|dt| dt.format("%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| t.to_string())
+}
+
 /// Inline SVG step-line for the curve. Pure numbers in, markup out: stroke
 /// follows the period sign via `currentColor` (the wrapper carries
 /// `up`/`down`). Empty periods render a flat zero line plus a note.
@@ -146,15 +153,38 @@ pub fn equity_svg(points: &[EquityPoint], since_ts: i64, now_ts: i64) -> String 
     };
     let end_dot = match points.last() {
         Some(last) => format!(
-            "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"3.5\" class=\"eq-dot\"/>",
+            "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"3.5\" class=\"eq-dot\" data-t=\"{}\" data-v=\"{:.2}\"><title>{} · {:+.2}</title></circle>",
             x(last.t),
-            y(last.v)
+            y(last.v),
+            last.t,
+            last.v,
+            fmt_point_ts(last.t),
+            last.v
         ),
         None => String::new(),
     };
+    // Trade dots (decimated to ~24 max): native hover tooltips plus a
+    // tap-to-inspect readout wired in live.js (delegated, survives HTMX
+    // swaps). The last point is covered by the end dot above.
+    let step = ((points.len().max(1) + 23) / 24).max(1);
+    let mut dots = String::new();
+    let mut i = 0;
+    while i + 1 < points.len() {
+        let p = &points[i];
+        dots.push_str(&format!(
+            "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"4.5\" class=\"eq-dot eq-trade\" data-t=\"{}\" data-v=\"{:.2}\"><title>{} · {:+.2}</title></circle>",
+            x(p.t),
+            y(p.v),
+            p.t,
+            p.v,
+            fmt_point_ts(p.t),
+            p.v
+        ));
+        i += step;
+    }
     format!(
         "<svg viewBox=\"0 0 {W} {H}\" role=\"img\" aria-label=\"Realized PnL curve\">\
-         {zero}<path d=\"{d}\" class=\"eq-line\" fill=\"none\"/>{end_dot}\
+         {zero}<path d=\"{d}\" class=\"eq-line\" fill=\"none\"/>{dots}{end_dot}\
          <text x=\"{:.1}\" y=\"{:.1}\" class=\"eq-label\">{:+.2}</text>\
          <text x=\"{:.1}\" y=\"{:.1}\" class=\"eq-label\" text-anchor=\"end\">{:+.2}</text>\
          </svg>",
@@ -170,6 +200,21 @@ pub fn equity_svg(points: &[EquityPoint], since_ts: i64, now_ts: i64) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dots_are_decimated_titled_and_data_tagged() {
+        let pts: Vec<EquityPoint> = (0..50)
+            .map(|i| EquityPoint { t: 1000 + i * 60, v: i as f64 * 0.1, trades: i as u32 + 1 })
+            .collect();
+        let svg = equity_svg(&pts, 900, 5000);
+        let circles = svg.match_indices("<circle").count();
+        assert!(circles <= 26, "decimated, got {circles}");
+        assert!(circles >= 2, "trade dots plus end dot");
+        // Every dot carries a native tooltip and machine-readable data.
+        assert_eq!(svg.match_indices("<title>").count(), circles);
+        assert!(svg.contains("data-t=\"1000\""));
+        assert!(svg.contains("UTC"));
+    }
 
     #[test]
     fn normalize_range_falls_back_to_week() {

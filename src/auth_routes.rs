@@ -156,6 +156,270 @@ pub async fn logout_handler() -> (axum::http::HeaderMap, Json<serde_json::Value>
     (headers, Json(serde_json::json!({"ok": true})))
 }
 
+/// Minimum length for newly chosen passwords (signup + password change).
+/// Login keeps accepting whatever was set before: this bar only ever
+/// ratchets new secrets up, and agents cannot touch it (env-free const).
+pub const MIN_PASSWORD_LEN: usize = 10;
+
+fn normalize_email(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase()
+}
+
+/// Shape check only (`local@domain.tld`): delivery is never attempted,
+/// so deliverability heuristics would be theater. No regex dep.
+fn valid_email(email: &str) -> bool {
+    let mut parts = email.split('@');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(local), Some(domain), None) => {
+            !local.is_empty()
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !domain.ends_with('.')
+        }
+        _ => false,
+    }
+}
+
+/// First tenant by age, creating `solo-admin` when the DB is empty.
+/// Same rule as the login auto-provision path, factored for reuse.
+async fn solo_tenant_id(
+    pool: &sqlx::PgPool,
+) -> Result<uuid::Uuid, (StatusCode, String)> {
+    match sqlx::query("SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1")
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?
+    {
+        Some(row) => {
+            use sqlx::Row;
+            row.try_get("id")
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("tenant: {e}")))
+        }
+        None => {
+            let row = sqlx::query("INSERT INTO tenants (name) VALUES ('solo-admin') RETURNING id")
+                .fetch_one(pool)
+                .await
+                .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?;
+            use sqlx::Row;
+            row.try_get("id")
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("tenant: {e}")))
+        }
+    }
+}
+
+/// Issue the dual session (JSON token + HttpOnly cookie). Same shape as
+/// login: API clients read the JSON, browsers ride the cookie.
+fn issue_session(
+    state: &AppState,
+    user_id: &uuid::Uuid,
+    tenant_id: &uuid::Uuid,
+) -> Result<(axum::http::HeaderMap, String), (StatusCode, String)> {
+    let exp = (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as usize;
+    let token = crate::auth::encode_jwt(
+        &user_id.to_string(),
+        &tenant_id.to_string(),
+        exp,
+        state.jwt_secret.as_bytes(),
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("jwt: {e}")))?;
+    let mut headers = axum::http::HeaderMap::new();
+    let cookie = format!(
+        "{}={token}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax",
+        crate::state::SESSION_COOKIE
+    );
+    if let Ok(value) = cookie.parse() {
+        headers.insert(axum::http::header::SET_COOKIE, value);
+    }
+    Ok((headers, token))
+}
+
+/// Incoming signup body.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SignupRequest {
+    pub email: String,
+    pub password: String,
+}
+
+/// `POST /api/auth/signup`: create a `member` account in the solo tenant.
+///
+/// Anyone with the URL can register — acceptable because the product is
+/// paper-only (no real funds, no withdrawals, nothing to steal). The
+/// response logs the new user in immediately (same dual session as login).
+/// Duplicate email becomes `409`; weak credentials become `400`.
+pub async fn signup_handler(
+    State(state): State<AppState>,
+    Json(req): Json<SignupRequest>,
+) -> Result<(StatusCode, axum::http::HeaderMap, Json<LoginResponse>), (StatusCode, String)> {
+    let email = normalize_email(&req.email);
+    if !valid_email(&email) {
+        return Err((StatusCode::BAD_REQUEST, "valid email required".to_string()));
+    }
+    if req.password.len() < MIN_PASSWORD_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("password too short (min {MIN_PASSWORD_LEN} characters)"),
+        ));
+    }
+    let tenant_id = solo_tenant_id(&state.pool).await?;
+    let taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE tenant_id = $1 AND email = $2)",
+    )
+    .bind(tenant_id)
+    .bind(&email)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?;
+    if taken {
+        return Err((StatusCode::CONFLICT, "email already registered".to_string()));
+    }
+    let hash = crate::auth::hash_password(&req.password)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("hash: {e}")))?;
+    let row = sqlx::query(
+        "INSERT INTO users (tenant_id, email, password_hash, role) VALUES ($1, $2, $3, 'member') RETURNING id",
+    )
+    .bind(tenant_id)
+    .bind(&email)
+    .bind(&hash)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?;
+    use sqlx::Row;
+    let user_id: uuid::Uuid = row
+        .try_get("id")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("user: {e}")))?;
+    let (headers, token) = issue_session(&state, &user_id, &tenant_id)?;
+    Ok((StatusCode::CREATED, headers, Json(LoginResponse { token })))
+}
+
+/// Server-rendered signup page (same SaaS card as login).
+#[derive(askama::Template)]
+#[template(path = "signup.html")]
+pub struct SignupTemplate;
+
+/// `GET /signup` renders the registration form. Public, like `/login`.
+pub async fn signup_page_handler() -> axum::response::Html<String> {
+    axum::response::Html(SignupTemplate.render().unwrap_or_default())
+}
+
+/// Account data shown on the settings page. Never a hash, never a token.
+#[derive(askama::Template)]
+#[template(path = "account.html")]
+pub struct AccountTemplate {
+    pub email: String,
+    pub role: String,
+    pub member_since: String,
+}
+
+/// `GET /account`: settings page for the signed-in user.
+pub async fn account_page_handler(
+    State(state): State<AppState>,
+    crate::state::AuthPage(tenant): crate::state::AuthPage,
+) -> Result<axum::response::Html<String>, (StatusCode, String)> {
+    let user_id: uuid::Uuid = tenant
+        .user_id
+        .parse()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
+    let tenant_id: uuid::Uuid = tenant
+        .tenant_id
+        .parse()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
+    let row = sqlx::query(
+        "SELECT email, role, created_at FROM users WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(user_id)
+    .bind(tenant_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?;
+    let Some(row) = row else {
+        return Err((StatusCode::NOT_FOUND, "account not found".to_string()));
+    };
+    use sqlx::Row;
+    let email: String = row
+        .try_get("email")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("user: {e}")))?;
+    let role: String = row
+        .try_get("role")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("user: {e}")))?;
+    let created: chrono::DateTime<chrono::Utc> = row
+        .try_get("created_at")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("user: {e}")))?;
+    let page = AccountTemplate {
+        email,
+        role,
+        member_since: created.format("%Y-%m-%d").to_string(),
+    };
+    Ok(axum::response::Html(
+        page.render()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("template: {e}")))?,
+    ))
+}
+
+/// Incoming password-change body.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+/// `POST /api/auth/change-password`: rotate the caller's own password.
+///
+/// Verifies the current password first (stolen-session window stays shut),
+/// then enforces the new-secret bar. Reusing the current password is a
+/// `400`: rotation must actually rotate.
+pub async fn change_password_handler(
+    State(state): State<AppState>,
+    tenant: crate::state::Tenant,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if req.new_password.len() < MIN_PASSWORD_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("password too short (min {MIN_PASSWORD_LEN} characters)"),
+        ));
+    }
+    let user_id: uuid::Uuid = tenant
+        .user_id
+        .parse()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
+    let tenant_id: uuid::Uuid = tenant
+        .tenant_id
+        .parse()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
+    let row = sqlx::query("SELECT password_hash FROM users WHERE id = $1 AND tenant_id = $2")
+        .bind(user_id)
+        .bind(tenant_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?;
+    let Some(row) = row else {
+        return Err((StatusCode::NOT_FOUND, "account not found".to_string()));
+    };
+    use sqlx::Row;
+    let hash: String = row
+        .try_get("password_hash")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("user: {e}")))?;
+    if !crate::auth::verify_password(&hash, &req.current_password) {
+        return Err((StatusCode::UNAUTHORIZED, "current password is wrong".to_string()));
+    }
+    if crate::auth::verify_password(&hash, &req.new_password) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "new password must differ from the current one".to_string(),
+        ));
+    }
+    let new_hash = crate::auth::hash_password(&req.new_password)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("hash: {e}")))?;
+    sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2 AND tenant_id = $3")
+        .bind(&new_hash)
+        .bind(user_id)
+        .bind(tenant_id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 /// Server-rendered solo-admin login page.
 ///
 /// Same-origin HTML shell; the form POSTs JSON to `/api/auth/login` and
@@ -197,6 +461,35 @@ mod page_tests {
         assert!(html.contains("/api/auth/login"), "form must target the login API");
         assert!(html.contains("window.location.href = \"/\""), "login must redirect to the dashboard");
         assert!(!html.contains("localStorage"), "session must live in the HttpOnly cookie, not localStorage");
+        assert!(html.contains("password-eye"), "login must offer a show/hide password toggle");
+        assert!(html.contains("/signup"), "login must link to the signup page");
+    }
+
+    #[tokio::test]
+    async fn signup_page_renders_form_without_db() {
+        let axum::response::Html(html) = signup_page_handler().await;
+        assert!(html.contains("<form"), "signup page must render a form");
+        assert!(html.contains("/api/auth/signup"), "form must target the signup API");
+        assert!(html.contains("password-eye"), "signup must offer a show/hide password toggle");
+        assert!(html.contains("/login"), "signup must link back to sign-in");
+        assert!(!html.contains("localStorage"), "session must live in the HttpOnly cookie, not localStorage");
+    }
+
+    #[tokio::test]
+    async fn account_template_renders_profile_without_secrets() {
+        let page = AccountTemplate {
+            email: "trader@example.com".to_string(),
+            role: "member".to_string(),
+            member_since: "2026-11-09".to_string(),
+        };
+        let html = page.render().expect("account renders");
+        assert!(html.contains("trader@example.com"), "account must show the email");
+        assert!(html.contains("member"), "account must show the role");
+        assert!(html.contains("2026-11-09"), "account must show member-since");
+        assert!(html.contains("/api/auth/change-password"), "account must wire the password form");
+        assert!(html.contains("password-eye"), "password fields must offer show/hide toggles");
+        assert!(!html.contains("password_hash"), "template must never touch hashes, got {html:?}");
+        assert!(!html.contains("localStorage"), "no client-side secret storage");
     }
 }
 
@@ -216,5 +509,130 @@ mod tests {
     fn empty_password_rejected_shape() {
         let req = LoginRequest { email: "a@b.c".to_string(), password: String::new() };
         assert!(req.password.is_empty());
+    }
+
+    #[test]
+    fn email_shape_check() {
+        assert!(valid_email("trader@example.com"));
+        assert!(valid_email("a@b.cd"));
+        assert!(!valid_email("no-at-sign"));
+        assert!(!valid_email("a@b"));
+        assert!(!valid_email("@b.com"));
+        assert!(!valid_email("a@.com"));
+        assert!(!valid_email("a@b."));
+        assert!(!valid_email("a@b@c.com"));
+        assert!(!valid_email(""));
+    }
+
+    #[test]
+    fn password_bar_is_ten() {
+        assert_eq!(MIN_PASSWORD_LEN, 10);
+    }
+}
+
+/// End-to-end account lifecycle against a real Postgres, gated on
+/// `WARDEN_TEST_DATABASE_URL` like every other DB proof in this repo:
+/// signup -> login -> wrong-password change rejected -> change -> new
+/// login works, old password dead.
+#[cfg(test)]
+mod account_flow_tests {
+    use super::*;
+    use axum::extract::State;
+
+    fn proof_state() -> Option<AppState> {
+        let url = std::env::var("WARDEN_TEST_DATABASE_URL").ok()?;
+        let pool = sqlx::PgPool::connect_lazy(&url).ok()?;
+        Some(AppState { pool, jwt_secret: "proof-secret-for-account-flow".to_string() })
+    }
+
+    #[tokio::test]
+    async fn signup_login_change_password_roundtrip() {
+        let Some(state) = proof_state() else { return };
+        let email = format!("flow{}@example.com", chrono::Utc::now().timestamp_millis());
+
+        // Signup creates the account and logs in immediately (201 + cookie).
+        let (status, headers, Json(body)) = signup_handler(
+            State(state.clone()),
+            Json(SignupRequest { email: email.clone(), password: "correct-horse-10".to_string() }),
+        )
+        .await
+        .expect("signup must succeed");
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(!body.token.is_empty());
+        let cookie = headers
+            .get(axum::http::header::SET_COOKIE)
+            .expect("signup must set the session cookie")
+            .to_str()
+            .expect("cookie ASCII")
+            .to_string();
+        assert!(cookie.starts_with("warden_token="), "session cookie, got {cookie:?}");
+        assert!(cookie.contains("HttpOnly"), "cookie must stay JS-invisible");
+
+        // Duplicate signup is a clean 409.
+        let dup = signup_handler(
+            State(state.clone()),
+            Json(SignupRequest { email: email.clone(), password: "another-long-10".to_string() }),
+        )
+        .await;
+        assert!(matches!(dup, Err((StatusCode::CONFLICT, _))), "duplicate must 409, got {dup:?}");
+
+        // Short password is a clean 400.
+        let weak = signup_handler(
+            State(state.clone()),
+            Json(SignupRequest { email: "weak@example.com".to_string(), password: "short".to_string() }),
+        )
+        .await;
+        assert!(matches!(weak, Err((StatusCode::BAD_REQUEST, _))), "weak must 400, got {weak:?}");
+
+        // Login works with the fresh credentials.
+        let (_, Json(login)) = login_handler(
+            State(state.clone()),
+            Json(LoginRequest { email: email.clone(), password: "correct-horse-10".to_string() }),
+        )
+        .await
+        .expect("login with fresh credentials must succeed");
+        assert!(!login.token.is_empty());
+        let claims = crate::auth::decode_jwt(&login.token, state.jwt_secret.as_bytes())
+            .expect("token must decode");
+        let tenant = crate::state::Tenant { tenant_id: claims.tenant_id, user_id: claims.sub };
+
+        // Wrong current password cannot rotate.
+        let bad = change_password_handler(
+            State(state.clone()),
+            tenant.clone(),
+            Json(ChangePasswordRequest {
+                current_password: "not-the-password-10".to_string(),
+                new_password: "brand-new-horse-10".to_string(),
+            }),
+        )
+        .await;
+        assert!(matches!(bad, Err((StatusCode::UNAUTHORIZED, _))), "wrong current must 401, got {bad:?}");
+
+        // Rotation works.
+        let Json(ok) = change_password_handler(
+            State(state.clone()),
+            tenant.clone(),
+            Json(ChangePasswordRequest {
+                current_password: "correct-horse-10".to_string(),
+                new_password: "brand-new-horse-10".to_string(),
+            }),
+        )
+        .await
+        .expect("rotation must succeed");
+        assert_eq!(ok, serde_json::json!({ "ok": true }));
+
+        // New password logs in, old password is dead.
+        login_handler(
+            State(state.clone()),
+            Json(LoginRequest { email: email.clone(), password: "brand-new-horse-10".to_string() }),
+        )
+        .await
+        .expect("login with rotated password must succeed");
+        let stale = login_handler(
+            State(state.clone()),
+            Json(LoginRequest { email, password: "correct-horse-10".to_string() }),
+        )
+        .await;
+        assert!(matches!(stale, Err((StatusCode::UNAUTHORIZED, _))), "old password must die, got {stale:?}");
     }
 }

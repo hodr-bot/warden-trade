@@ -141,4 +141,32 @@
       });
     }
   };
+
+  // Expired session: HTMX swaps silently do nothing on auth failure (the
+  // 302 to /login is followed, then hx-select finds no target). Any 401
+  // or a swap whose final URL is the login page means "log in again".
+  document.addEventListener("htmx:responseError", function (ev) {
+    var s = ev.detail && ev.detail.xhr ? ev.detail.xhr.status : 0;
+    if (s === 401 || s === 403) window.location.href = "/login";
+  });
+  document.addEventListener("htmx:beforeSwap", function (ev) {
+    var url = ev.detail && ev.detail.xhr ? ev.detail.xhr.responseURL : "";
+    if (url && url.indexOf("/login") !== -1) window.location.href = "/login";
+  });
+
+  // Timeline dots: tap (or click) a dot to pin its value in the readout
+  // line under the chart. Delegated on document so HTMX swaps keep working.
+  document.addEventListener("click", function (ev) {
+    var dot = ev.target && ev.target.closest ? ev.target.closest(".eq-dot") : null;
+    if (!dot) return;
+    var readout = document.getElementById("eq-readout");
+    if (!readout) return;
+    var t = dot.getAttribute("data-t");
+    var v = dot.getAttribute("data-v");
+    if (t === null || v === null) return;
+    var d = new Date(parseInt(t, 10) * 1000);
+    var when = isNaN(d.getTime()) ? ("t=" + t) : d.toISOString().slice(5, 16).replace("T", " ") + " UTC";
+    var num = parseFloat(v);
+    readout.textContent = when + " · " + (isNaN(num) ? v : (num >= 0 ? "+" : "") + num.toFixed(2) + " $");
+  });
 })();

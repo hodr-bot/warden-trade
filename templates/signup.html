@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Warden Trade - Sign up</title>
+  {% include "_style.html" %}
+  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+</head>
+<body class="page">
+  <main class="main container" id="signup">
+    <section class="section auth-card" aria-label="Sign up">
+      <div class="auth-head">
+        <span class="nav-brand-mark auth-logo" aria-hidden="true"></span>
+        <div class="muted auth-brand">Warden Trade</div>
+        <h1>Create your account</h1>
+        <p class="muted auth-sub">Paper trading only · no real funds.</p>
+      </div>
+      <form id="signup-form">
+        <div class="field">
+          <label for="signup-email">Email</label>
+          <input class="input" id="signup-email" name="email" type="email" autocomplete="username" required />
+        </div>
+        <div class="field">
+          <label for="signup-password">Password <span class="muted">(min 10 characters)</span></label>
+          <div class="password-wrap">
+            <input class="input" id="signup-password" name="password" type="password" autocomplete="new-password" minlength="10" required />
+            <button type="button" class="password-eye" data-for="signup-password" aria-label="Show password" aria-pressed="false">
+              <svg class="eye-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg class="eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="signup-error" class="alert alert-danger" role="alert" hidden></div>
+        <div id="signup-ok" class="alert alert-success" role="status" hidden></div>
+        <button class="btn btn-primary btn-block" type="submit" id="signup-submit">Create account</button>
+      </form>
+      <p class="auth-switch">Already have an account? <a href="/login">Sign in</a></p>
+      <p class="muted auth-foot">Paper trading only · no real funds.</p>
+    </section>
+  </main>
+<script>
+(function () {
+  // Show/hide toggle for the password field. Pure DOM: the secret never
+  // leaves the input element.
+  document.querySelectorAll(".password-eye").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var input = document.getElementById(btn.getAttribute("data-for"));
+      if (!input) return;
+      var show = input.type === "password";
+      input.type = show ? "text" : "password";
+      btn.setAttribute("aria-pressed", show ? "true" : "false");
+      btn.setAttribute("aria-label", show ? "Hide password" : "Show password");
+      input.focus();
+    });
+  });
+  var form = document.getElementById("signup-form");
+  var err = document.getElementById("signup-error");
+  var ok = document.getElementById("signup-ok");
+  var btn = document.getElementById("signup-submit");
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    err.hidden = true;
+    ok.hidden = true;
+    btn.disabled = true;
+    var email = document.getElementById("signup-email").value;
+    var password = document.getElementById("signup-password").value;
+    fetch("/api/auth/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: email, password: password })
+    }).then(function (resp) {
+      if (resp.status === 409) { throw new Error("This email is already registered. Try signing in."); }
+      if (!resp.ok) { throw new Error("Sign-up failed (HTTP " + resp.status + ")."); }
+      return resp.json();
+    }).then(function (data) {
+      // Session cookie (HttpOnly) is set by the server on this response;
+      // nothing to store client-side. The token stays out of JS reach.
+      ok.hidden = false;
+      ok.textContent = "Account created. Redirecting…";
+      window.setTimeout(function () { window.location.href = "/"; }, 600);
+    }).catch(function (e) {
+      err.hidden = false;
+      err.textContent = e.message || "Sign-up failed.";
+      btn.disabled = false;
+    });
+  });
+})();
+</script>
+</body>
+</html>

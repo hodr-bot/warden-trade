@@ -673,6 +673,17 @@ table.table {
   color: var(--text-strong);
 }
 
+.tab {
+  cursor: pointer;
+}
+
+/* While htmx fetches the new period, dim the tabs: the click is alive,
+   the server is answering. */
+.tab.htmx-request {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
 /* --------------------------------------------------------------------------
    8b. Timeline (portfolio realized-PnL curve, server-rendered SVG)
    -------------------------------------------------------------------------- */
@@ -724,6 +735,19 @@ table.table {
 
 .timeline-chart .eq-dot {
   fill: currentColor;
+  cursor: pointer;
+}
+
+/* Larger invisible hit area so dots are tappable on touch screens. */
+.timeline-chart .eq-trade {
+  stroke: transparent;
+  stroke-width: 10;
+}
+
+.eq-readout {
+  margin-top: var(--space-2);
+  font-size: var(--fs-sm);
+  min-height: 1.25rem;
 }
 
 .timeline-chart .eq-label {
@@ -1014,6 +1038,60 @@ textarea.input {
   text-align: center;
   margin-top: var(--space-5);
   font-size: var(--fs-xs);
+}
+
+.auth-switch {
+  text-align: center;
+  margin-top: var(--space-3);
+  font-size: var(--fs-sm);
+}
+
+/* Password field with a show/hide eye toggle. */
+.password-wrap {
+  position: relative;
+}
+
+.password-wrap .input {
+  width: 100%;
+  padding-right: 2.5rem;
+}
+
+.password-eye {
+  position: absolute;
+  right: 0.25rem;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.password-eye:hover {
+  color: var(--text-strong);
+}
+
+.password-eye svg {
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+.password-eye .eye-off {
+  display: none;
+}
+
+.password-eye[aria-pressed="true"] .eye-off {
+  display: block;
+}
+
+.password-eye[aria-pressed="true"] .eye-on {
+  display: none;
 }
 
 .alert {

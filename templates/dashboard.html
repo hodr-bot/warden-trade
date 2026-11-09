@@ -6,7 +6,7 @@
   <title>Warden Trade - Dashboard</title>
   {% include "_style.html" %}
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
-  <script src="/static/live.js?v=0.2.9" defer></script>
+  <script src="/static/live.js?v=0.3.0" defer></script>
 </head>
 <body class="page">
   <nav class="nav" aria-label="Primary">
@@ -16,6 +16,7 @@
         <li><a href="/" aria-current="page">Dashboard</a></li>
         <li><a href="/markets">Markets</a></li>
         <li><a href="/orders">Orders</a></li>
+        <li><a href="/account">Account</a></li>
         <li><button class="nav-logout" id="logout" type="button">Logout</button></li>
       </ul>
     </div>
@@ -112,6 +113,7 @@
              hx-target="#dashboard"
              hx-swap="outerHTML"
              hx-select="#dashboard"
+             hx-push-url="true"
              class="tab{% if range == "hour" %} active{% endif %}"
              {% if range == "hour" %}aria-current="true"{% endif %}>hour</a>
           <a href="/?range=day"
@@ -119,6 +121,7 @@
              hx-target="#dashboard"
              hx-swap="outerHTML"
              hx-select="#dashboard"
+             hx-push-url="true"
              class="tab{% if range == "day" %} active{% endif %}"
              {% if range == "day" %}aria-current="true"{% endif %}>day</a>
           <a href="/?range=week"
@@ -126,6 +129,7 @@
              hx-target="#dashboard"
              hx-swap="outerHTML"
              hx-select="#dashboard"
+             hx-push-url="true"
              class="tab{% if range == "week" %} active{% endif %}"
              {% if range == "week" %}aria-current="true"{% endif %}>week</a>
           <a href="/?range=month"
@@ -133,6 +137,7 @@
              hx-target="#dashboard"
              hx-swap="outerHTML"
              hx-select="#dashboard"
+             hx-push-url="true"
              class="tab{% if range == "month" %} active{% endif %}"
              {% if range == "month" %}aria-current="true"{% endif %}>month</a>
           <a href="/?range=all"
@@ -140,6 +145,7 @@
              hx-target="#dashboard"
              hx-swap="outerHTML"
              hx-select="#dashboard"
+             hx-push-url="true"
              class="tab{% if range == "all" %} active{% endif %}"
              {% if range == "all" %}aria-current="true"{% endif %}>all</a>
         </div>
@@ -150,6 +156,7 @@
           <span class="muted">{{ period_trades }} closing trades</span>
         </div>
         <div class="timeline-chart {{ period_class }}">{{ equity_svg|safe }}</div>
+        <p class="muted eq-readout" id="eq-readout" aria-live="polite">Hover or tap a dot for its value.</p>
         {% if period_trades == 0 %}
         <p class="muted">No closing trades in this period yet.</p>
         {% endif %}

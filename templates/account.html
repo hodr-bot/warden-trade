@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Warden Trade - Account</title>
+  {% include "_style.html" %}
+  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+  <script src="/static/live.js?v=0.3.0" defer></script>
+</head>
+<body class="page">
+  <nav class="nav" aria-label="Primary">
+    <div class="nav-inner">
+      <a class="nav-brand" href="/"><span class="nav-brand-mark" aria-hidden="true"></span>Warden Trade</a>
+      <ul class="nav-links">
+        <li><a href="/">Dashboard</a></li>
+        <li><a href="/markets">Markets</a></li>
+        <li><a href="/orders">Orders</a></li>
+        <li><a href="/account" aria-current="page">Account</a></li>
+        <li><button class="nav-logout" id="logout" type="button">Logout</button></li>
+      </ul>
+    </div>
+  </nav>
+
+  <main class="main container" id="account">
+    <div class="section-head">
+      <div>
+        <h1>Account</h1>
+        <p>Your sign-in and security settings.</p>
+      </div>
+    </div>
+
+    <section class="section" aria-label="Profile">
+      <div class="section-head">
+        <div>
+          <h2>Profile</h2>
+        </div>
+      </div>
+      <table class="table">
+        <tbody>
+          <tr><th scope="row">Email</th><td>{{ email }}</td></tr>
+          <tr><th scope="row">Role</th><td>{{ role }}</td></tr>
+          <tr><th scope="row">Member since</th><td>{{ member_since }}</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section" aria-label="Change password">
+      <div class="section-head">
+        <div>
+          <h2>Change password</h2>
+          <p>Min 10 characters. You stay signed in on this browser.</p>
+        </div>
+      </div>
+      <form id="password-form">
+        <div class="field">
+          <label for="current-password">Current password</label>
+          <div class="password-wrap">
+            <input class="input" id="current-password" name="current_password" type="password" autocomplete="current-password" required />
+            <button type="button" class="password-eye" data-for="current-password" aria-label="Show password" aria-pressed="false">
+              <svg class="eye-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg class="eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="new-password">New password <span class="muted">(min 10 characters)</span></label>
+          <div class="password-wrap">
+            <input class="input" id="new-password" name="new_password" type="password" autocomplete="new-password" minlength="10" required />
+            <button type="button" class="password-eye" data-for="new-password" aria-label="Show password" aria-pressed="false">
+              <svg class="eye-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg class="eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="2" y1="2" x2="22" y2="22"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="confirm-password">Confirm new password</label>
+          <input class="input" id="confirm-password" type="password" autocomplete="new-password" required />
+        </div>
+        <div id="password-error" class="alert alert-danger" role="alert" hidden></div>
+        <div id="password-ok" class="alert alert-success" role="status" hidden></div>
+        <button class="btn btn-primary" type="submit" id="password-submit">Update password</button>
+      </form>
+    </section>
+  </main>
+<script>
+(function () {
+  // Show/hide toggles for the password fields. Pure DOM: secrets never
+  // leave their input elements.
+  document.querySelectorAll(".password-eye").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var input = document.getElementById(btn.getAttribute("data-for"));
+      if (!input) return;
+      var show = input.type === "password";
+      input.type = show ? "text" : "password";
+      btn.setAttribute("aria-pressed", show ? "true" : "false");
+      btn.setAttribute("aria-label", show ? "Hide password" : "Show password");
+      input.focus();
+    });
+  });
+  var form = document.getElementById("password-form");
+  var err = document.getElementById("password-error");
+  var ok = document.getElementById("password-ok");
+  var btn = document.getElementById("password-submit");
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    err.hidden = true;
+    ok.hidden = true;
+    var current = document.getElementById("current-password").value;
+    var next = document.getElementById("new-password").value;
+    var confirm = document.getElementById("confirm-password").value;
+    if (next !== confirm) {
+      err.hidden = false;
+      err.textContent = "New passwords do not match.";
+      return;
+    }
+    btn.disabled = true;
+    fetch("/api/auth/change-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ current_password: current, new_password: next })
+    }).then(function (resp) {
+      if (resp.status === 401) { throw new Error("Current password is wrong."); }
+      if (!resp.ok) { throw new Error("Update failed (HTTP " + resp.status + ")."); }
+      return resp.json();
+    }).then(function () {
+      ok.hidden = false;
+      ok.textContent = "Password updated.";
+      form.reset();
+      btn.disabled = false;
+    }).catch(function (e) {
+      if (e.message === "Current password is wrong." || e.message.indexOf("Update failed") === 0) {
+        err.hidden = false;
+        err.textContent = e.message;
+      } else {
+        err.hidden = false;
+        err.textContent = "Update failed.";
+      }
+      btn.disabled = false;
+    });
+  });
+})();
+</script>
+</body>
+</html>

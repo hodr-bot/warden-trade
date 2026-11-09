@@ -570,6 +570,18 @@ mod tests {
             rendered.contains("Advisor") && rendered.contains("bullish 0.70"),
             "advisor opinions must render on the dashboard"
         );
+        assert!(
+            rendered.contains("hx-push-url=\"true\""),
+            "timeline tabs must push the range into the URL (back button, refresh)"
+        );
+        assert!(
+            rendered.contains("id=\"eq-readout\""),
+            "timeline must carry the tap-to-inspect readout"
+        );
+        assert!(
+            rendered.contains("/account"),
+            "nav must link to the account page"
+        );
     }
 
     #[tokio::test]
