@@ -248,6 +248,10 @@ pub async fn latest_opinions(
 /// tick: the first symbol whose latest opinion is older than
 /// [`advisor_interval_secs`] (a symbol with no opinion yet is overdue).
 /// The opinion is recorded; it is never consulted for order placement.
+///
+/// J3: runs on its OWN task ([`spawn_advisor`]), no longer inside the
+/// trading tick — the LLM (50 s timeout, external API) must never pace
+/// or stall order evaluation.
 pub async fn tick_advisor(state: &crate::state::AppState) -> Option<String> {
     if !advisor_enabled() {
         return None;
@@ -303,6 +307,22 @@ pub async fn tick_advisor(state: &crate::state::AppState) -> Option<String> {
         return None;
     }
     Some(format!("advisor {symbol} {stance} {confidence:.2}"))
+}
+
+/// Dedicated counsel loop (J3): the LLM runs on its own cadence, OUTSIDE
+/// the trading tick. One overdue symbol per pass, then sleep the full
+/// [`advisor_interval_secs`] — opinions stay fresh without ever pacing
+/// order evaluation. Disabled without key + model. Spawned once from
+/// `main`; never in tests.
+pub fn spawn_advisor(state: crate::state::AppState) {
+    tokio::spawn(async move {
+        loop {
+            if let Some(note) = tick_advisor(&state).await {
+                tracing::info!("{note}");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(advisor_interval_secs())).await;
+        }
+    });
 }
 
 /// `GET /api/advisor`: latest recorded opinions for the caller's tenant.

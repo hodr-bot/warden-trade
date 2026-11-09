@@ -19,8 +19,12 @@ pub struct PaperOrder {
     pub side: String,
     /// Order quantity in base currency.
     pub qty: f64,
-    /// Limit price in quote currency.
+    /// Execution price in quote currency (post-slippage fill).
     pub price: f64,
+    /// Fee paid on this fill, in quote currency ([`crate::fees::FEE_BPS`]).
+    /// Older rows predate the column: 0 means unknown, never backfilled.
+    #[serde(default)]
+    pub fee: f64,
     /// Order status, e.g. `"placed"`.
     pub status: String,
     /// RFC3339 creation timestamp.
@@ -59,6 +63,7 @@ impl PaperLedger {
             side: intent.side,
             qty: intent.qty,
             price: intent.price,
+            fee: 0.0,
             status: "placed".to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
         });

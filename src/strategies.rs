@@ -170,6 +170,49 @@ pub fn momentum_signal(closes: &[f64]) -> StrategySignal {
     }
 }
 
+/// Shared strategy interface (J3 parity): the backtester drives the SAME
+/// rule object the live loop votes with, instead of re-implementing the
+/// crossover inline. Adding a strategy means implementing this trait —
+/// the live vote and the backtest stay in sync by construction.
+pub trait Strategy {
+    fn name(&self) -> &'static str;
+    fn signal(&self, closes: &[f64]) -> StrategySignal;
+}
+
+/// SMA(3)/SMA(8) crossover, live rule [`sma_signal`].
+pub struct SmaCross;
+/// 20-price z-score fade, live rule [`mean_reversion_signal`].
+pub struct MeanReversion;
+/// 10-period rate-of-change breakout, live rule [`momentum_signal`].
+pub struct Momentum;
+
+impl Strategy for SmaCross {
+    fn name(&self) -> &'static str {
+        "sma-3-8"
+    }
+    fn signal(&self, closes: &[f64]) -> StrategySignal {
+        sma_signal(closes)
+    }
+}
+
+impl Strategy for MeanReversion {
+    fn name(&self) -> &'static str {
+        "mean-reversion-20"
+    }
+    fn signal(&self, closes: &[f64]) -> StrategySignal {
+        mean_reversion_signal(closes)
+    }
+}
+
+impl Strategy for Momentum {
+    fn name(&self) -> &'static str {
+        "momentum-10"
+    }
+    fn signal(&self, closes: &[f64]) -> StrategySignal {
+        momentum_signal(closes)
+    }
+}
+
 /// Merge strategy votes by majority.
 ///
 /// Most `Buy` wins `Buy`, most `Sell` wins `Sell`; ties, empty input

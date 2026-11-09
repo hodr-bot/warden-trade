@@ -83,6 +83,7 @@ pub async fn orders_handler(
                         side: r.try_get("side").unwrap_or_default(),
                         qty: r.try_get("qty").unwrap_or_default(),
                         price: r.try_get("price").unwrap_or_default(),
+                        fee: r.try_get("fee").unwrap_or_default(),
                         status: r.try_get("status").unwrap_or_else(|_| "filled".to_string()),
                         created_at: r
                             .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
@@ -129,11 +130,15 @@ pub async fn place_paper_order(
 ) -> Result<PaperOrder, (StatusCode, String)> {
     let _gate = state.order_gate.lock().await;
     let pool = &state.pool;
+    // J3 cost parity: the fill executes post-slippage and pays the taker
+    // fee, exactly like the backtester assumes ([`crate::fees`]).
+    let exec_price = crate::fees::fill_price(side, price);
+    let fee = crate::fees::fee_for(exec_price * qty);
     let intent = OrderIntent {
         symbol: symbol.to_string(),
         side: side.to_string(),
         qty,
-        price,
+        price: exec_price,
     };
     // Risk gate: per-tenant limits from Postgres. The engine never writes
     // limits; agents have no path to change them. Marks feed the
@@ -146,16 +151,17 @@ pub async fn place_paper_order(
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let row = sqlx::query(
-        "INSERT INTO paper_orders (tenant_id, exchange, symbol, side, qty, price, status, idempotency_key)
-         VALUES ($1, $2, $3, $4, $5, $6, 'filled', $7)
-         RETURNING id::TEXT AS id, exchange, symbol, side, qty, price, status, created_at",
+        "INSERT INTO paper_orders (tenant_id, exchange, symbol, side, qty, price, fee, status, idempotency_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'filled', $8)
+         RETURNING id::TEXT AS id, exchange, symbol, side, qty, price, fee, status, created_at",
     )
     .bind(tenant_id)
     .bind(exchange)
     .bind(symbol)
     .bind(side)
     .bind(qty)
-    .bind(price)
+    .bind(exec_price)
+    .bind(fee)
     .bind(idempotency_key)
     .fetch_one(pool)
     .await
@@ -177,6 +183,7 @@ pub async fn place_paper_order(
         side: row.try_get("side").unwrap_or_default(),
         qty: row.try_get("qty").unwrap_or_default(),
         price: row.try_get("price").unwrap_or_default(),
+        fee: row.try_get("fee").unwrap_or_default(),
         status: row.try_get("status").unwrap_or_else(|_| "filled".to_string()),
         created_at: row
             .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
@@ -250,7 +257,7 @@ pub async fn orders_page_handler(
         Err(_) => return axum::response::Html("invalid tenant".to_string()),
     };
     let rows = sqlx::query(
-        "SELECT id::TEXT AS id, exchange, symbol, side, qty, price, status, created_at
+        "SELECT id::TEXT AS id, exchange, symbol, side, qty, price, COALESCE(fee, 0) AS fee, status, created_at
          FROM paper_orders WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 100",
     )
     .bind(tenant_id)
@@ -270,6 +277,7 @@ pub async fn orders_page_handler(
                     side: row.try_get("side").unwrap_or_default(),
                     qty: row.try_get("qty").unwrap_or(0.0),
                     price: row.try_get("price").unwrap_or(0.0),
+                    fee: row.try_get("fee").unwrap_or(0.0),
                     status: row.try_get("status").unwrap_or_default(),
                     created_at: created_at.to_rfc3339(),
                 }

@@ -25,15 +25,46 @@ pub const PAIRS: [(&str, &str); 3] = [
 ];
 
 /// Latest mark per symbol, written by the feed task, read by SSE.
-static MARKS: OnceLock<RwLock<BTreeMap<String, f64>>> = OnceLock::new();
+static MARKS: OnceLock<RwLock<BTreeMap<String, Mark>>> = OnceLock::new();
 
-fn marks() -> &'static RwLock<BTreeMap<String, f64>> {
+/// One mark with its arrival time (J3 watchdog: marks are timestamped,
+/// so a silent-but-open socket reads as stale instead of live).
+#[derive(Debug, Clone, Copy)]
+struct Mark {
+    price: f64,
+    at: std::time::Instant,
+}
+
+fn marks() -> &'static RwLock<BTreeMap<String, Mark>> {
     MARKS.get_or_init(|| RwLock::new(BTreeMap::new()))
 }
 
 /// Current marks (copy). Empty when the feed never connected.
 pub fn current_marks() -> BTreeMap<String, f64> {
-    marks().read().map(|m| m.clone()).unwrap_or_default()
+    marks()
+        .read()
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.price)).collect())
+        .unwrap_or_default()
+}
+
+/// Feed health (J3 watchdog): `stale` when no mark arrived within
+/// [`STALE_AFTER`], plus the oldest-mark age in seconds for the UI.
+/// A feed that never connected counts as stale (age = u64::MAX sentinel
+/// would confuse; the payload uses `null` instead — see caller).
+pub const STALE_AFTER: Duration = Duration::from_secs(60);
+
+pub fn feed_health() -> (bool, Option<u64>) {
+    let guard = marks().read().ok();
+    let map = match guard.as_ref() {
+        Some(g) => g,
+        None => return (true, None),
+    };
+    if map.is_empty() {
+        return (true, None);
+    }
+    let oldest = map.values().map(|m| m.at).min().unwrap_or_else(std::time::Instant::now);
+    let age = oldest.elapsed().as_secs();
+    (age > STALE_AFTER.as_secs(), Some(age))
 }
 
 /// Map a Kraken v1 pair name to our symbol. `None` for pairs we don't track.
@@ -68,20 +99,29 @@ pub fn parse_ticker(msg: &serde_json::Value) -> Option<(String, f64)> {
 /// Record one mark. The single writer is the feed task.
 pub fn record_mark(symbol: &str, price: f64) {
     if let Ok(mut m) = marks().write() {
-        m.insert(symbol.to_string(), price);
+        m.insert(
+            symbol.to_string(),
+            Mark {
+                price,
+                at: std::time::Instant::now(),
+            },
+        );
     }
 }
 
 /// One feed iteration against `url` (v1 WS API): subscribe, then record
-/// ticker marks until the socket dies. Returns when the connection drops so
-/// the supervisor can reconnect with backoff.
-async fn feed_once(url: &str) {
+/// ticker marks until the socket dies. Returns whether at least one mark
+/// arrived, so the supervisor can reset its backoff on a healthy run
+/// instead of escalating forever (J3: backoff reset). A socket that stays
+/// open but silent for 45s is dropped and reconnected (J3 watchdog:
+/// stale-but-open no longer reads as live).
+async fn feed_once(url: &str) -> bool {
     use futures_util::SinkExt;
     use tokio_tungstenite::connect_async;
     use tokio_tungstenite::tungstenite::Message;
 
     let Ok((mut ws, _)) = connect_async(url).await else {
-        return;
+        return false;
     };
     let pairs: Vec<&str> = PAIRS.iter().map(|(_, k)| *k).collect();
     let sub = serde_json::json!({
@@ -90,9 +130,17 @@ async fn feed_once(url: &str) {
         "subscription": { "name": "ticker" },
     });
     if ws.send(Message::Text(sub.to_string().into())).await.is_err() {
-        return;
+        return false;
     }
-    while let Some(msg) = ws.next().await {
+    let mut got_mark = false;
+    loop {
+        // Watchdog: silence for 45s means a dead socket, not a calm
+        // market — break out so the supervisor reconnects.
+        let msg = match tokio::time::timeout(Duration::from_secs(45), ws.next()).await {
+            Err(_) => break,
+            Ok(None) => break,
+            Ok(Some(msg)) => msg,
+        };
         let Ok(msg) = msg else { break };
         let text = match msg {
             Message::Text(t) => t.to_string(),
@@ -104,31 +152,61 @@ async fn feed_once(url: &str) {
         };
         if let Some((symbol, price)) = parse_ticker(&v) {
             record_mark(&symbol, price);
+            got_mark = true;
         }
     }
+    got_mark
 }
 
-/// Supervisor: runs forever, reconnects with backoff (5s, 15s, 30s, 30s…).
+/// Supervisor: runs forever, reconnects with backoff (5s, 15s, 30s…).
+/// A run that delivered marks resets the backoff (healthy reconnects
+/// stay cheap); only mark-less runs escalate (J3: backoff reset).
 /// Spawned once from `main`; never in tests.
 pub fn spawn_feed() {
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(5);
         loop {
-            feed_once("wss://ws.kraken.com").await;
+            let healthy = feed_once("wss://ws.kraken.com").await;
+            // Always pause between runs (a flapping socket that delivers
+            // one mark then dies must not hot-loop); the pause just stays
+            // short after healthy runs and escalates after silent ones.
             tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(Duration::from_secs(30));
+            backoff = if healthy {
+                Duration::from_secs(5)
+            } else {
+                (backoff * 2).min(Duration::from_secs(30))
+            };
         }
     });
 }
 
 /// Portfolio block for the live snapshot, computed server-side from live
-/// fills + current marks. Mirrors the dashboard valuation (same FIFO),
-/// scoped to the caller's tenant.
+/// fills + current marks. Mirrors the dashboard valuation (same FIFO,
+/// fees subtracted once at portfolio level), scoped to the caller's
+/// tenant.
+///
+/// J3: one snapshot per tenant per 2 s, shared by every SSE connection —
+/// N browser tabs no longer mean N `paper_orders` scans + N FX calls
+/// per tick. The FX leg reuses the 120 s process-wide cache.
+static SNAP_CACHE: OnceLock<std::sync::Mutex<BTreeMap<String, (std::time::Instant, serde_json::Value)>>> =
+    OnceLock::new();
+
 async fn portfolio_json(
     pool: &sqlx::PgPool,
     tenant_id: uuid::Uuid,
     marks: &BTreeMap<String, f64>,
 ) -> serde_json::Value {
+    let key = tenant_id.to_string();
+    if let Ok(g) = SNAP_CACHE
+        .get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+        .lock()
+    {
+        if let Some(cached) = g.get(&key) {
+            if cached.0.elapsed().as_secs() < 2 {
+                return cached.1.clone();
+            }
+        }
+    }
     let fills: Vec<(String, String, f64, f64)> = sqlx::query_as(
         "SELECT symbol, side, qty, price FROM paper_orders WHERE tenant_id = $1 ORDER BY created_at ASC",
     )
@@ -145,10 +223,17 @@ async fn portfolio_json(
     }
     let (realized, closed, _wins, unrealized, open_value) =
         crate::dashboard::value_positions(&by_symbol, marks);
-    let eur_rate = crate::dashboard::fetch_usd_eur().await;
-    let total = realized + unrealized;
+    let fees_paid: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(fee), 0) FROM paper_orders WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0.0);
+    let eur_rate = crate::dashboard::cached_usd_eur().await;
+    let total = realized + unrealized - fees_paid;
     let capital = crate::dashboard::paper_starting_capital_usd() + total;
-    serde_json::json!({
+    let out = serde_json::json!({
         "capital": crate::dashboard::fmt_usd(capital),
         "capital_sub": crate::dashboard::fmt_eur(capital, eur_rate),
         "capital_class": crate::dashboard::delta_class(total),
@@ -161,9 +246,18 @@ async fn portfolio_json(
         "realized_sub": crate::dashboard::fmt_eur(realized, eur_rate),
         "unrealized": crate::dashboard::fmt_usd(unrealized),
         "unrealized_sub": crate::dashboard::fmt_eur(unrealized, eur_rate),
+        "fees_paid": crate::dashboard::fmt_usd(fees_paid),
         "open_value": crate::dashboard::fmt_usd(open_value),
         "closed": closed,
-    })
+    });
+    if let Ok(g) = SNAP_CACHE
+        .get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+        .lock()
+        .as_deref_mut()
+    {
+        g.insert(key, (std::time::Instant::now(), out.clone()));
+    }
+    out
 }
 
 /// `GET /api/live/stream`: SSE snapshot every 2s (marks + portfolio).
@@ -184,8 +278,10 @@ pub async fn stream_handler(
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
             let marks = current_marks();
+            let (stale, age_secs) = feed_health();
             let data = serde_json::json!({
                 "marks": marks,
+                "feed": { "stale": stale, "age_secs": age_secs },
                 "portfolio": portfolio_json(&pool, tenant_id, &marks).await,
             });
             let event = axum::response::sse::Event::default().data(data.to_string());
@@ -220,6 +316,17 @@ mod tests {
         assert_eq!(kraken_pair_to_symbol("ETH/USD"), Some("ETH-USD"));
         assert_eq!(kraken_pair_to_symbol("SOL/USD"), Some("SOL-USD"));
         assert_eq!(kraken_pair_to_symbol("DOGE/USD"), None);
+    }
+
+    #[test]
+    fn fresh_marks_read_healthy() {
+        // NOTE: shares the process-wide MARKS map with other tests; the
+        // assertion only needs *some* fresh mark, not a specific symbol.
+        record_mark("BTC-USD", 70_000.0);
+        let (stale, age) = feed_health();
+        assert!(!stale);
+        assert!(age.is_some());
+        assert_eq!(current_marks().get("BTC-USD"), Some(&70_000.0));
     }
 
     #[test]

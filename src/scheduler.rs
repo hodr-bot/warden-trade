@@ -177,11 +177,8 @@ pub async fn tick(state: &AppState) -> String {
     for symbol in scheduler_symbols() {
         summaries.push(tick_symbol(state, tenant_id, &symbol, sentiment).await);
     }
-    // Read-only counsel: one overdue symbol max, never consulted for orders.
-    // No-op without LLM_API_KEY + LLM_MODEL.
-    if let Some(note) = crate::advisor::tick_advisor(state).await {
-        summaries.push(note);
-    }
+    // J3: counsel runs on its own task (spawn_advisor) — the trading tick
+    // never waits on the LLM.
     summaries.join(" | ")
 }
 

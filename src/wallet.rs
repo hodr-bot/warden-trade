@@ -17,6 +17,11 @@ pub const DEFAULT_RPC_URL: &str = "https://api.mainnet-beta.solana.com";
 pub const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
 /// Configured watch address (`WALLET_WATCH_ADDRESS`), if any.
+///
+/// J3: legacy process-wide default, kept ONLY as the one-time seed for
+/// the solo tenant at boot ([`seed_from_env`]). Display and handlers
+/// must use [`tenant_watch_address`] — the env value is never shown to
+/// tenants that did not configure their own address.
 pub fn watch_address() -> Option<String> {
     std::env::var("WALLET_WATCH_ADDRESS")
         .ok()
@@ -123,6 +128,119 @@ impl std::fmt::Display for WalletError {
             WalletError::Rpc(_) => write!(f, "wallet RPC error"),
         }
     }
+}
+
+/// This tenant's watch-only address, if they configured one (J3: wallet
+/// addresses belong to tenants, not to the process env — one tenant can
+/// never see another's address).
+pub async fn tenant_watch_address(
+    pool: &sqlx::PgPool,
+    tenant_id: uuid::Uuid,
+) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT address FROM wallet_watch_addresses WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Set this tenant's watch-only address. The value must pass
+/// [`validate_watch_address`] (public address only — secret keys and
+/// seed phrases are rejected before touching the DB).
+pub async fn set_tenant_watch_address(
+    pool: &sqlx::PgPool,
+    tenant_id: uuid::Uuid,
+    address: &str,
+) -> Result<(), &'static str> {
+    validate_watch_address(address)?;
+    sqlx::query(
+        "INSERT INTO wallet_watch_addresses (tenant_id, address) VALUES ($1, $2)
+         ON CONFLICT (tenant_id) DO UPDATE SET address = EXCLUDED.address, created_at = now()",
+    )
+    .bind(tenant_id)
+    .bind(address.trim())
+    .execute(pool)
+    .await
+    .map_err(|_| "could not save watch address")?;
+    Ok(())
+}
+
+/// Forget this tenant's watch-only address.
+pub async fn clear_tenant_watch_address(
+    pool: &sqlx::PgPool,
+    tenant_id: uuid::Uuid,
+) -> Result<(), &'static str> {
+    sqlx::query("DELETE FROM wallet_watch_addresses WHERE tenant_id = $1")
+        .bind(tenant_id)
+        .execute(pool)
+        .await
+        .map_err(|_| "could not clear watch address")?;
+    Ok(())
+}
+
+/// One-time migration (J3): if the table is empty, the env
+/// `WALLET_WATCH_ADDRESS` is still the owner's configured address —
+/// adopt it onto the solo tenant instead of dropping it. New tenants
+/// start empty; the env value is never broadcast to anyone else.
+pub async fn seed_from_env(pool: &sqlx::PgPool) {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM wallet_watch_addresses")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(1);
+    if count > 0 {
+        return;
+    }
+    let Some(addr) = watch_address() else { return };
+    if validate_watch_address(&addr).is_err() {
+        return;
+    }
+    let Some(tenant_id) = crate::scheduler::solo_tenant(pool).await else { return };
+    if set_tenant_watch_address(pool, tenant_id, &addr).await.is_ok() {
+        tracing::info!("adopted WALLET_WATCH_ADDRESS onto solo tenant (one-time)");
+    }
+}
+
+/// Request body for `PUT /api/wallet/watch`.
+#[derive(Debug, serde::Deserialize)]
+pub struct WatchAddressRequest {
+    pub address: String,
+}
+
+/// `PUT /api/wallet/watch`: set the caller's watch-only address.
+/// Validated public-only; never a secret. Requires login ([`Tenant`]).
+pub async fn set_watch_handler(
+    tenant: crate::state::Tenant,
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+    axum::Json(req): axum::Json<WatchAddressRequest>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+    let tenant_id: uuid::Uuid = tenant
+        .tenant_id
+        .parse()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid tenant".to_string()))?;
+    set_tenant_watch_address(&state.pool, tenant_id, &req.address)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(axum::Json(serde_json::json!({ "ok": true })))
+}
+
+/// `DELETE /api/wallet/watch`: forget the caller's watch-only address.
+pub async fn clear_watch_handler(
+    tenant: crate::state::Tenant,
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+    let tenant_id: uuid::Uuid = tenant
+        .tenant_id
+        .parse()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid tenant".to_string()))?;
+    clear_tenant_watch_address(&state.pool, tenant_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(axum::Json(serde_json::json!({ "ok": true })))
 }
 
 /// Fetch SOL balance + parsed token accounts for a validated address.

@@ -16,6 +16,7 @@ mod dashboard;
 mod equity;
 mod exits;
 mod exchanges;
+mod fees;
 mod kraken;
 mod live;
 mod livetrade;
@@ -76,6 +77,11 @@ async fn main() {
         .route("/api/autonomy", get(autonomy::autonomy_handler))
         .route("/api/advisor", get(advisor::advisor_handler))
         .route("/api/live/status", get(kraken::live_status_handler))
+        .route(
+            "/api/wallet/watch",
+            axum::routing::put(wallet::set_watch_handler)
+                .delete(wallet::clear_watch_handler),
+        )
         .route("/api/live/stream", get(live::stream_handler))
         .route("/api/admin/tenants", get(admin::admin_tenants_handler))
         .nest_service("/static", ServeDir::new("static"))
@@ -107,6 +113,12 @@ async fn main() {
         }
         scheduler::spawn(state.clone());
         scheduler::spawn_exit_watch(state.clone());
+        // J3: counsel on its own task — the trading tick never waits on
+        // the LLM. No-op without LLM_API_KEY + LLM_MODEL.
+        advisor::spawn_advisor(state.clone());
+        // J3: adopt the legacy env watch address onto the solo tenant
+        // once, so the owner's view survives the per-tenant migration.
+        wallet::seed_from_env(&state.pool).await;
     } else {
         tracing::info!("scheduler off (SCHEDULER_ENABLED=false)");
     }

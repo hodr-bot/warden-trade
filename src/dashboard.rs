@@ -132,6 +132,36 @@ pub async fn fetch_usd_eur() -> Option<f64> {
     body.get("rates")?.get("EUR")?.as_f64()
 }
 
+/// Cached FX rate (J3 SSE: one HTTP call per 120 s process-wide instead
+/// of one per SSE client every 2 s). Stale cache serves while the refresh
+/// fails — the dashboard hides EUR only when no rate was ever fetched.
+static FX_CACHE: std::sync::OnceLock<std::sync::Mutex<(Option<std::time::Instant>, Option<f64>)>> =
+    std::sync::OnceLock::new();
+
+pub async fn cached_usd_eur() -> Option<f64> {
+    let slot = FX_CACHE.get_or_init(|| std::sync::Mutex::new((None, None)));
+    let (fresh, cached) = match slot.lock().ok() {
+        Some(g) => {
+            let fresh = g.0.map(|t| t.elapsed().as_secs() < 120).unwrap_or(false);
+            (fresh, g.1)
+        }
+        None => (false, None),
+    };
+    if fresh {
+        return cached;
+    }
+    let rate = fetch_usd_eur().await;
+    if let Ok(mut g) = slot.lock() {
+        // Cache the fetch time even on failure: a dead FX API must not
+        // turn every SSE tick into a 10 s-timeout stampede.
+        g.0 = Some(std::time::Instant::now());
+        if rate.is_some() {
+            g.1 = rate;
+        }
+    }
+    rate.or(cached)
+}
+
 /// Net long position from fills: `(qty, average entry price)`.
 ///
 /// FIFO consumption of buys by sells. `(0, 0)` when flat or net-short:
@@ -307,6 +337,16 @@ pub async fn dashboard_handler(
         tracing::warn!("dashboard orders degraded: {e}");
         Vec::new()
     });
+    // J3 cost parity: fees are sunk costs, subtracted once at portfolio
+    // level (same 10 bps the backtester charges). Pre-fee rows predate
+    // the column and read as 0 — never backfilled with fiction.
+    let fees_paid: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(fee), 0) FROM paper_orders WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or(0.0);
     // FIFO per symbol (single-symbol today, grouped anyway).
     use std::collections::BTreeMap;
     let mut by_symbol: BTreeMap<String, Vec<(String, f64, f64)>> = BTreeMap::new();
@@ -325,8 +365,10 @@ pub async fn dashboard_handler(
     let (eq_points, eq_period, eq_trades) = crate::equity::equity_curve(&timed, since_ts);
     let eq_svg = crate::equity::equity_svg(&eq_points, since_ts, now_ts);
     // Watch-only real wallet (public address, read-only, best effort).
+    // J3: this tenant's address only — never the process env, never
+    // another tenant's. Empty for tenants that configured nothing.
     let (wallet_configured, wallet_label, wallet_sol, wallet_tokens) =
-        match crate::wallet::watch_address() {
+        match crate::wallet::tenant_watch_address(&state.pool, tenant_id).await {
             Some(addr) if crate::wallet::validate_watch_address(&addr).is_ok() => {
                 let http = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(10))
@@ -411,8 +453,8 @@ pub async fn dashboard_handler(
             .collect()
     })
     .unwrap_or_default();
-    let eur = fetch_usd_eur().await;
-    let total = realized + unrealized;
+    let eur = cached_usd_eur().await;
+    let total = realized + unrealized - fees_paid;
     let capital = paper_starting_capital_usd() + total;
     // Read-only counsel: newest opinions for display only, never traded on.
     let opinions: Vec<String> = crate::advisor::latest_opinions(&state.pool, tenant_id, 5)
@@ -434,7 +476,7 @@ pub async fn dashboard_handler(
         unrealized_class: delta_class(unrealized),
         unrealized_sub: fmt_eur(unrealized, eur),
         trades_count: fills.len().to_string(),
-        fees_paid: "0".to_string(),
+        fees_paid: fmt_usd(fees_paid),
         drawdown: fmt_money(realized.min(0.0)),
         win_rate: if closed == 0 {
             "—".to_string()

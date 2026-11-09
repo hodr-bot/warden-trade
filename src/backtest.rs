@@ -24,14 +24,14 @@ pub struct BacktestResult {
 /// Rules (pure, deterministic, long-or-flat, 1.0 unit per trade):
 /// - fast SMA(3) vs slow SMA(8); enter long when fast crosses above slow,
 ///   exit when fast crosses back below (or at the last price).
-/// - each round trip pays `fee_bps` basis points per side on notional.
+/// - each round trip pays [`crate::fees::FEE_BPS`] basis points per side
+///   on notional (J3: same const the live fills pay).
 /// - `total_pnl_f64` is net realized PnL; `wins` counts profitable trips.
 /// - `max_drawdown_f64` is the worst peak-to-trough equity drop.
 /// - fewer than 9 prices yields zero trades (slow window never fills).
 pub fn run_backtest(strategy: &str, prices: &[f64]) -> BacktestResult {
     const FAST: usize = 3;
     const SLOW: usize = 8;
-    const FEE_BPS: f64 = 10.0; // 0.10% per side
     let empty = || BacktestResult {
         strategy: strategy.to_string(),
         trades: 0,
@@ -76,7 +76,7 @@ pub fn run_backtest(strategy: &str, prices: &[f64]) -> BacktestResult {
         } else if entry.is_some() && fast_prev >= slow_prev && fast_now < slow_now {
             let open = entry.take().unwrap();
             let gross = prices[i] - open;
-            let fee = (open + prices[i]) * FEE_BPS / 10_000.0;
+            let fee = (open + prices[i]) * crate::fees::FEE_BPS / 10_000.0;
             let net = gross - fee;
             trades += 1;
             if net > 0.0 {
@@ -90,7 +90,7 @@ pub fn run_backtest(strategy: &str, prices: &[f64]) -> BacktestResult {
     if let Some(open) = entry.take() {
         let close = prices[prices.len() - 1];
         let gross = close - open;
-        let fee = (open + close) * FEE_BPS / 10_000.0;
+        let fee = (open + close) * crate::fees::FEE_BPS / 10_000.0;
         let net = gross - fee;
         trades += 1;
         if net > 0.0 {
@@ -103,6 +103,93 @@ pub fn run_backtest(strategy: &str, prices: &[f64]) -> BacktestResult {
 
     BacktestResult {
         strategy: strategy.to_string(),
+        trades,
+        wins,
+        total_pnl_f64: total_pnl,
+        max_drawdown_f64: max_dd,
+        win_rate_f64: if trades > 0 {
+            wins as f64 / trades as f64
+        } else {
+            0.0
+        },
+    }
+}
+
+/// Backtest any [`crate::strategies::Strategy`] over a price series (J3).
+///
+/// Same economics as [`run_backtest`] (long-or-flat, 1.0 unit, fee per
+/// side via [`crate::fees`]) but the entry/exit rule is the strategy's
+/// OWN `signal`, evaluated per bar on the closes seen so far — the exact
+/// function the live loop votes with. No duplicated crossover logic.
+pub fn run_backtest_strategy(
+    strategy: &dyn crate::strategies::Strategy,
+    prices: &[f64],
+) -> BacktestResult {
+    use crate::strategies::Signal;
+    let empty = || BacktestResult {
+        strategy: strategy.name().to_string(),
+        trades: 0,
+        wins: 0,
+        total_pnl_f64: 0.0,
+        max_drawdown_f64: 0.0,
+        win_rate_f64: 0.0,
+    };
+    if prices.len() <= 8 {
+        return empty();
+    }
+    let mut trades = 0usize;
+    let mut wins = 0usize;
+    let mut total_pnl = 0.0f64;
+    let mut equity = 0.0f64;
+    let mut peak = 0.0f64;
+    let mut max_dd = 0.0f64;
+    let mut entry: Option<f64> = None;
+    let settle = |equity: f64, peak: &mut f64, max_dd: &mut f64| {
+        if equity > *peak {
+            *peak = equity;
+        }
+        let dd = *peak - equity;
+        if dd > *max_dd {
+            *max_dd = dd;
+        }
+    };
+    for i in 0..prices.len() {
+        let vote = strategy.signal(&prices[..=i]).signal;
+        if entry.is_none() && vote == Signal::Buy {
+            entry = Some(prices[i]);
+        } else if let Some(open) = entry.take() {
+            if vote == Signal::Sell {
+                let gross = prices[i] - open;
+                let fee = (open + prices[i]) * crate::fees::FEE_BPS / 10_000.0;
+                let net = gross - fee;
+                trades += 1;
+                if net > 0.0 {
+                    wins += 1;
+                }
+                equity += net;
+                total_pnl += net;
+                settle(equity, &mut peak, &mut max_dd);
+                // entry consumed by the take() above
+            } else {
+                entry = Some(open);
+            }
+        }
+    }
+    if let Some(open) = entry.take() {
+        let close = prices[prices.len() - 1];
+        let gross = close - open;
+        let fee = (open + close) * crate::fees::FEE_BPS / 10_000.0;
+        let net = gross - fee;
+        trades += 1;
+        if net > 0.0 {
+            wins += 1;
+        }
+        equity += net;
+        total_pnl += net;
+        settle(equity, &mut peak, &mut max_dd);
+    }
+    BacktestResult {
+        strategy: strategy.name().to_string(),
         trades,
         wins,
         total_pnl_f64: total_pnl,
@@ -152,7 +239,10 @@ pub async fn backtest_handler(
             let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
             let from = candles.first().map(|c| c.time);
             let to = candles.last().map(|c| c.time);
-            let result = run_backtest("sma-3-8", &closes);
+            // J3 parity: the endpoint runs the live SMA rule itself,
+            // not a parallel re-implementation.
+            let result =
+                run_backtest_strategy(&crate::strategies::SmaCross, &closes);
             (candles.len(), from, to, result)
         }
         Err(e) => {
@@ -226,6 +316,41 @@ mod tests {
         let result = run_backtest("sma", &prices);
         assert_eq!(result.trades, 0);
         assert_eq!(result.total_pnl_f64, 0.0);
+    }
+
+    #[test]
+    fn strategy_engine_matches_legacy_sma_engine() {
+        // J3 parity: the shared-rule engine must agree trade-for-trade
+        // with the legacy inline SMA engine on every shape of series.
+        use crate::strategies::SmaCross;
+        let series: Vec<Vec<f64>> = vec![
+            vec![],
+            vec![100.0, 101.0],
+            vec![100.0; 15],
+            vec![
+                100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, //
+                101.0, 102.0, 103.0, 104.0, 105.0,
+            ],
+            (0..15).map(|i| 200.0 - i as f64).collect(),
+            vec![
+                100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, //
+                110.0, 120.0, 90.0, 80.0, 70.0, 75.0, 85.0, 95.0, 90.0, 80.0,
+            ],
+        ];
+        for prices in &series {
+            let legacy = run_backtest("sma-3-8", prices);
+            let shared = run_backtest_strategy(&SmaCross, prices);
+            assert_eq!(legacy.trades, shared.trades, "trades on {prices:?}");
+            assert_eq!(legacy.wins, shared.wins, "wins on {prices:?}");
+            assert!(
+                (legacy.total_pnl_f64 - shared.total_pnl_f64).abs() < 1e-9,
+                "pnl on {prices:?}"
+            );
+            assert!(
+                (legacy.max_drawdown_f64 - shared.max_drawdown_f64).abs() < 1e-9,
+                "dd on {prices:?}"
+            );
+        }
     }
 
     #[test]

@@ -64,7 +64,21 @@ impl AppState {
         }
         let bind_addr = std::env::var("BIND_ADDR")
             .unwrap_or_else(|_| "127.0.0.1:3000".to_string());
-        let pool = PgPool::connect_lazy(&database_url).expect("DATABASE_URL invalide");
+        // J3: bounded pool instead of defaults. Small VPS: 5 conns is
+        // plenty (scheduler + SSE cache + handlers); acquire timeout so a
+        // wedged DB degrades instead of hanging requests forever.
+        let max_conns: u32 = std::env::var("DB_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5)
+            .clamp(1, 20);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(max_conns)
+            .min_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .idle_timeout(std::time::Duration::from_secs(300))
+            .connect_lazy(&database_url)
+            .expect("DATABASE_URL invalide");
         (Self { pool, jwt_secret, order_gate: Default::default() }, bind_addr)
     }
 }
