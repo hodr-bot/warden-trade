@@ -103,9 +103,14 @@ pub async fn limit_auth(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     // Behind cloudflared the TCP peer is always loopback, so identity comes
-    // from the proxy headers; direct LAN hits without headers share one
-    // global bucket, which is the safe (strict) fallback.
-    let ip = client_ip(req.headers(), None);
+    // from the proxy headers first; direct hits fall back to the TCP peer
+    // (read from extensions: into_make_service_with_connect_info inserts it).
+    // Never a global bucket: one LAN client must not eat everyone's budget.
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.ip());
+    let ip = client_ip(req.headers(), peer);
     match ip {
         Some(ip) if limiter.allow(ip) => next.run(req).await,
         Some(ip) => (
