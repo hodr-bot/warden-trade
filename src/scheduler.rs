@@ -155,6 +155,57 @@ async fn tick_symbol(
         Some(p) if p.is_finite() && p > 0.0 => p,
         _ => return format!("{symbol} skipped: no price to trade"),
     };
+    // Protective exits pre-empt any fresh signal: stop-loss, take-profit
+    // (trailing when enabled) and post-exit cooldown live in
+    // [`crate::exits`]. Exits sell through the same risk-gated order path
+    // as signals, so limits still apply; sales are never blocked.
+    {
+        let (held, avg) = long_held(&state.pool, tenant_id, symbol).await;
+        let position = if held > 0.0 {
+            Some(crate::exits::Position { qty: held, avg })
+        } else {
+            None
+        };
+        match crate::exits::check_exit(symbol, price, position) {
+            crate::exits::ExitCheck::Exit { qty, reason, .. } => {
+                let capped = crate::exits::cap_sell_qty(qty, held);
+                if capped <= 0.0 {
+                    return format!("{symbol} exit skipped: nothing held ({reason})");
+                }
+                crate::exits::note_exit(symbol);
+                let slot = chrono::Utc::now().timestamp() / scheduler_interval_secs() as i64;
+                let key = format!("exit-sell-{symbol}-{slot}");
+                match crate::orders::place_paper_order(
+                    &state.pool,
+                    tenant_id,
+                    "coinbase",
+                    symbol,
+                    "sell",
+                    capped,
+                    price,
+                    Some(&key),
+                )
+                .await
+                {
+                    Ok(order) => {
+                        return format!(
+                            "{symbol} protective exit {reason}: sold {} @ {:.2} (id {})",
+                            order.qty, order.price, order.id
+                        )
+                    }
+                    Err((status, msg)) => {
+                        return format!("{symbol} exit rejected ({status}): {msg}")
+                    }
+                }
+            }
+            crate::exits::ExitCheck::Cooldown { ticks_left } => {
+                return format!(
+                    "{symbol} cooldown: {ticks_left} ticks left, signal cycle skipped"
+                )
+            }
+            crate::exits::ExitCheck::Hold => {}
+        }
+    }
     if side == "sell" {
         // No short selling on spot paper: cap the sell at what we hold.
         let (held, _) = long_held(&state.pool, tenant_id, symbol).await;

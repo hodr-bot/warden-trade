@@ -13,7 +13,7 @@
 //! Peaks and cooldowns live in process memory ([`EXIT_STATE`]); a restart
 //! re-seeds the peak at `max(entry average, current price)`. Documented and
 //! acceptable in paper mode. Agents cannot change these parameters: they
-//! come from env only (`STOP_LOSS_PCT` default 0.10, `TAKE_PROFIT_PCT`
+//! come from env only (`STOP_LOSS_PCT` default 0.02, `TAKE_PROFIT_PCT`
 //! default 0.05, `TRAILING_STOP` default true, `EXIT_COOLDOWN_TICKS`
 //! default 3; a 0 percentage disables that exit).
 
@@ -98,7 +98,7 @@ fn env_bool(name: &str, def: bool) -> bool {
 /// restart. Consumes one cooldown tick when cooling down; arms the cooldown
 /// when an exit fires.
 pub fn check_exit(symbol: &str, price: f64, position: Option<Position>) -> ExitCheck {
-    let stop_pct = env_pct("STOP_LOSS_PCT", 0.10);
+    let stop_pct = env_pct("STOP_LOSS_PCT", 0.02);
     let tp_pct = env_pct("TAKE_PROFIT_PCT", 0.05);
     let trailing = env_bool("TRAILING_STOP", true);
     let cooldown_ticks = env_u32("EXIT_COOLDOWN_TICKS", 3);
@@ -260,6 +260,27 @@ mod tests {
         assert_eq!(u2, 0.0);
         assert_eq!(o2, 0.0);
         assert_eq!(r2, realized);
+    }
+
+    #[test]
+    fn default_stop_is_two_percent() {
+        let _guard = lock();
+        reset_exit_state();
+        // Empty string does not parse: falls back to the compiled default.
+        std::env::set_var("STOP_LOSS_PCT", "");
+        std::env::set_var("TAKE_PROFIT_PCT", "0.0");
+        std::env::set_var("TRAILING_STOP", "false");
+        std::env::set_var("EXIT_COOLDOWN_TICKS", "0");
+        // Entry 100: -1% holds, past -2% exits.
+        assert_eq!(check_exit("BTC-USD", 99.0, pos(1.0, 100.0)), ExitCheck::Hold);
+        match check_exit("ETH-USD", 97.9, pos(1.0, 100.0)) {
+            ExitCheck::Exit { kind, .. } => assert_eq!(kind, ExitKind::StopLoss),
+            other => panic!("expected default stop exit, got {other:?}"),
+        }
+        std::env::remove_var("STOP_LOSS_PCT");
+        std::env::remove_var("TAKE_PROFIT_PCT");
+        std::env::remove_var("TRAILING_STOP");
+        std::env::remove_var("EXIT_COOLDOWN_TICKS");
     }
 
     #[test]
