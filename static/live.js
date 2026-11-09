@@ -3,9 +3,9 @@
 // in place with a brief directional flash. If the stream drops, the 30s
 // HTMX polling keeps pages fresh — this script stays silent.
 //
-// NOTE: templates load this file with ?v=<release> because Cloudflare
-// caches /static/* at the edge. Bump the query string in dashboard.html,
-// markets.html and orders.html on every live.js change.
+// NOTE: base.html loads this file with ?v=<release> because Cloudflare
+// caches /static/* at the edge. Bump the query string in base.html (the
+// single place) on every live.js change.
 (function () {
   if (window.__wardenLive) return;
   window.__wardenLive = true;
@@ -56,25 +56,49 @@
     }
   }
 
+  // Status bar (shell footer): feed state + time of the last tick. The bar
+  // lives outside the swapped regions, so these references stay valid.
+  var stFeed = document.getElementById("st-feed");
+  var stText = document.getElementById("st-feed-text");
+  var stTime = document.getElementById("st-time");
+  var lastMsg = 0;
+  function setFeed(state, label) {
+    if (!stFeed) return;
+    stFeed.className = "st st-" + state;
+    if (stText) stText.textContent = label;
+  }
+
   var es;
   try {
     es = new EventSource("/api/live/stream");
   } catch (e) {
+    setFeed("off", "Polling");
     return; // no EventSource support: HTMX polling covers freshness
   }
 
-  es.onerror = function () {
-    // 401 (session expired / signed out) kills the stream server-side:
-    // EventSource would otherwise retry forever on an error page.
-    // A fetch probe distinguishes "logged out" (back to /login) from a
-    // transient drop (HTMX polling covers freshness meanwhile).
-    es.close();
-    fetch("/api/live/stream", { headers: { "Accept": "text/event-stream" } }).then(function (resp) {
-      if (resp.status === 401 && window.location.pathname !== "/login") {
-        window.location.href = "/login";
-      }
-    }).catch(function () { /* offline: stay, polling covers it */ });
+  es.onopen = function () {
+    setFeed("live", "Live");
   };
+
+  es.onerror = function () {
+    // A network drop leaves readyState CONNECTING: the browser retries by
+    // itself, so the stream must NOT be closed or probed (a probe on the
+    // stream URL would open a second never-ending connection server-side).
+    // CLOSED means the server refused the stream: 401 = session expired.
+    setFeed("off", es.readyState === EventSource.CLOSED ? "Offline" : "Reconnecting");
+    if (es.readyState === EventSource.CLOSED) {
+      fetch("/api/live/status", { credentials: "same-origin" }).then(function (resp) {
+        if (resp.status === 401 && window.location.pathname !== "/login") {
+          window.location.href = "/login";
+        }
+      }).catch(function () { /* offline: stay, polling covers it */ });
+    }
+  };
+
+  // No tick for 8s while the connection looks open = stale marks.
+  window.setInterval(function () {
+    if (lastMsg && Date.now() - lastMsg > 8000) setFeed("stale", "Stale");
+  }, 2000);
 
   es.onmessage = function (ev) {
     var msg;
@@ -83,6 +107,9 @@
     } catch (e) {
       return;
     }
+    lastMsg = Date.now();
+    setFeed("live", "Live");
+    if (stTime) stTime.textContent = "Updated " + new Date().toLocaleTimeString("en-GB");
     // Marks -> every price cell for that symbol.
     // Kraken REST pairs shown on /markets mirror our symbols 1:1.
     var ALIAS = { "XBTUSD": "BTC-USD", "ETHUSD": "ETH-USD", "SOLUSD": "SOL-USD" };

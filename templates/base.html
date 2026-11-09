@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Warden Trade - {% block title %}{% endblock %}</title>
+  {% include "_style.html" %}
+  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+  <script src="/static/live.js?v=0.3.1" defer></script>
+</head>
+<body class="app">
+<div class="shell">
+  <aside class="side">
+    <div class="side-head">
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Warden Trade</a>
+    </div>
+    <nav class="side-nav" aria-label="Primary">
+      <p class="side-label">Workspace</p>
+      <ul class="side-list">
+        <li><a class="side-link" href="/" {% block nav_dashboard %}{% endblock %}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>Dashboard</a></li>
+        <li><a class="side-link" href="/markets" {% block nav_markets %}{% endblock %}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17l5-6 4 4 6-8"/><path d="M18 7h3v3"/></svg>Markets</a></li>
+        <li><a class="side-link" href="/orders" {% block nav_orders %}{% endblock %}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>Orders</a></li>
+        <li><a class="side-link" href="/account" {% block nav_account %}{% endblock %}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/></svg>Account</a></li>
+      </ul>
+    </nav>
+    <div class="side-watch" aria-label="Watchlist">
+      <p class="side-label">Watchlist</p>
+      <ul class="side-list">
+        <li><span class="side-link watch"><span class="watch-sym">BTC</span><span class="watch-px" data-mark="BTC-USD">&mdash;</span></span></li>
+        <li><span class="side-link watch"><span class="watch-sym">ETH</span><span class="watch-px" data-mark="ETH-USD">&mdash;</span></span></li>
+        <li><span class="side-link watch"><span class="watch-sym">SOL</span><span class="watch-px" data-mark="SOL-USD">&mdash;</span></span></li>
+      </ul>
+    </div>
+    <div class="side-foot">
+      <button class="side-link" id="logout" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>Logout</button>
+    </div>
+  </aside>
+
+  <div class="workspace">
+    <div class="topbar">
+      <div class="view-tabs"><span class="view-tab">{% block tab_title %}{% endblock %}</span></div>
+      {% block tabs_extra %}{% endblock %}
+      <div class="topbar-actions">
+        {% block actions %}{% endblock %}
+      </div>
+    </div>
+
+    <div class="panel">
+      {% block content %}{% endblock %}
+    </div>
+
+    <div class="statusbar" role="status" aria-label="Feed status">
+      <span class="st st-live" id="st-feed"><span class="st-dot" aria-hidden="true"></span><span id="st-feed-text">Live</span></span>
+      <span class="st" id="st-time">Updated &mdash;</span>
+      <span class="st st-end">Paper trading only &middot; no real funds</span>
+    </div>
+  </div>
+</div>
+{% block scripts %}{% endblock %}
+</body>
+</html>

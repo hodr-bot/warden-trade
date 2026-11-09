@@ -281,53 +281,32 @@ pre {
   margin: 0;
 }
 
-/* App shell with sidebar (not used by current pages) */
-.layout {
-  display: grid;
-  grid-template-columns: 220px 1fr;
-  gap: var(--space-6);
-  align-items: start;
-}
-
-.layout-content {
-  min-width: 0;
-}
-
 /* --------------------------------------------------------------------------
-   5. Navigation
-   Solid bar, hairline underneath. Active page = underline on the bar edge.
+   5. App shell
+   Sidebar (workspace nav + live watchlist) | tab strip, content panel, status
+   bar. The shell fills the viewport and the panel body scrolls inside it, so
+   navigation and status stay in place. Under 900px it becomes a compact top
+   strip and the page scrolls normally.
    -------------------------------------------------------------------------- */
-.nav {
-  position: sticky;
-  top: 0;
-  z-index: 50;
-  background: var(--background);
-  border-bottom: 1px solid var(--border);
+:root {
+  --side-w: 248px;
 }
 
-.nav-inner {
-  max-width: var(--container-max);
-  height: var(--nav-height);
-  margin-inline: auto;
-  padding-inline: var(--space-5);
-  display: flex;
-  align-items: center;
-  gap: var(--space-6);
+body.app {
+  height: 100dvh;
+  overflow: hidden;
 }
 
-.nav-brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: var(--fs-md);
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  color: var(--text-strong);
-  text-decoration: none;
-  white-space: nowrap;
+.shell {
+  display: grid;
+  grid-template-columns: var(--side-w) minmax(0, 1fr);
+  gap: var(--space-3);
+  height: 100dvh;
+  padding: var(--space-3);
 }
 
-/* Mark: a ring with a dot. The warden keeps watch. */
+/* Brand mark: a ring with a dot. The warden keeps watch. */
+.brand-mark,
 .nav-brand-mark {
   position: relative;
   width: 18px;
@@ -337,6 +316,7 @@ pre {
   border-radius: 50%;
 }
 
+.brand-mark::after,
 .nav-brand-mark::after {
   content: "";
   position: absolute;
@@ -345,112 +325,332 @@ pre {
   background: var(--text-strong);
 }
 
-.nav-links {
-  align-self: stretch;
+/* --- Sidebar ------------------------------------------------------------ */
+.side {
   display: flex;
-  list-style: none;
-  padding: 0;
-  margin: 0;
+  flex-direction: column;
+  min-height: 0;
+  padding: var(--space-3);
+  overflow-y: auto;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
 }
 
-.nav-links li {
-  display: flex;
+.side-head {
+  padding: 6px var(--space-2) var(--space-3);
 }
 
-.nav-links a {
-  position: relative;
+.brand {
   display: flex;
   align-items: center;
-  padding-inline: var(--space-3);
-  color: var(--muted);
-  font-size: var(--fs-sm);
-  font-weight: 500;
+  gap: 10px;
+  color: var(--text-strong);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  letter-spacing: -0.01em;
   text-decoration: none;
-  transition: color 0.12s ease;
+  white-space: nowrap;
 }
 
-.nav-links a:hover {
-  color: var(--text-strong);
-}
-
-.nav-links a[aria-current="page"],
-.nav-links a.active {
-  color: var(--text-strong);
-}
-
-.nav-links a[aria-current="page"]::after,
-.nav-links a.active::after {
-  content: "";
-  position: absolute;
-  left: var(--space-3);
-  right: var(--space-3);
-  bottom: -1px;
-  height: 2px;
-  background: var(--text-strong);
-}
-
-.nav-links a:focus-visible {
-  outline-offset: -4px;
-}
-
-/* Logout sits in the nav like a link, but it is a session action. */
-.nav-logout {
-  display: flex;
-  align-items: center;
-  padding-inline: var(--space-3);
-  background: none;
-  border: 0;
-  cursor: pointer;
+.side-label {
+  margin: 0;
+  padding: var(--space-4) var(--space-2) 6px;
   color: var(--muted);
-  font: inherit;
   font-size: var(--fs-sm);
   font-weight: 500;
-  transition: color 0.12s ease;
 }
 
-.nav-logout:hover {
-  color: var(--text-strong);
-}
-
-.nav-logout:focus-visible {
-  outline-offset: -4px;
-}
-
-/* Sidebar nav (inside .layout) */
-.sidebar {
-  position: sticky;
-  top: calc(var(--nav-height) + var(--space-5));
-  padding-right: var(--space-4);
-  border-right: 1px solid var(--border);
-}
-
-.sidebar ul {
-  list-style: none;
-  padding: 0;
+.side-list {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.sidebar a {
-  display: block;
-  padding: 7px var(--space-3);
+.side-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.side-link svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  color: var(--muted);
+}
+
+.side-link:hover {
+  background: var(--surface);
+}
+
+.side-link[aria-current="page"] {
+  background: var(--surface-2);
+  color: var(--text-strong);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.side-link[aria-current="page"] svg {
+  color: var(--text-strong);
+}
+
+.side-link:focus-visible {
+  outline-offset: -2px;
+}
+
+/* Watchlist row: symbol left, live price right */
+.side-link.watch {
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.watch-sym {
+  color: var(--muted);
+}
+
+.watch-px {
+  color: var(--text-strong);
+}
+
+.side-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: auto;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-soft);
+}
+
+.side-watch {
+  margin-bottom: var(--space-3);
+}
+
+/* --- Workspace ---------------------------------------------------------- */
+.workspace {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: 0;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-height: 36px;
+  padding-inline: 2px;
+}
+
+.view-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.view-tab {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px var(--space-3);
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--border);
+  color: var(--text-strong);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* In-page jump links (plain links: there is no scroll-spy, so no fake "active") */
+.jump {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  overflow-x: auto;
+}
+
+.jump a {
+  padding: 6px 10px;
   border-radius: var(--radius-md);
   color: var(--muted);
   font-size: var(--fs-sm);
   font-weight: 500;
   text-decoration: none;
+  white-space: nowrap;
+  transition: color 0.12s ease, background 0.12s ease;
 }
 
-.sidebar a:hover {
-  color: var(--text-strong);
+.jump a:hover {
   background: var(--surface);
+  color: var(--text-strong);
 }
 
-.sidebar a[aria-current="page"],
-.sidebar a.active {
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-left: auto;
+}
+
+.panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--background);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+}
+
+.view {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.panel-bar {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  padding: 11px var(--space-4);
+  border-bottom: 1px solid var(--border-soft);
+  font-size: var(--fs-sm);
+}
+
+.panel-title {
   color: var(--text-strong);
-  background: var(--surface-2);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.panel-body {
+  flex: 1;
+  min-height: 0;
+  padding: var(--space-5) var(--space-5) var(--space-6);
+  overflow-y: auto;
+  scroll-behavior: smooth;
+  scroll-padding-top: var(--space-4);
+}
+
+.panel-body > * {
+  max-width: var(--container-max);
+}
+
+#account .section {
+  max-width: 520px;
+}
+
+/* --- Status bar --------------------------------------------------------- */
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-height: 26px;
+  padding-inline: var(--space-2);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+
+.st {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.st-end {
+  margin-left: auto;
+}
+
+.st-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted-soft);
+}
+
+.st-live .st-dot {
+  background: var(--success);
+  animation: live-pulse 2.4s ease-in-out infinite;
+}
+
+.st-stale .st-dot {
+  background: var(--warning);
+}
+
+.st-off .st-dot {
+  background: var(--danger);
+}
+
+/* --- Dashboard blocks --------------------------------------------------- */
+.split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 var(--space-6);
+}
+
+.feed {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--border);
+}
+
+.feed li {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+
+/* Cards that are not part of the summary grid (wallet): free-standing */
+.cards.cards-flex {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  background: none;
+  border: 0;
+  border-radius: 0;
+  overflow: visible;
+}
+
+.cards-flex > .card {
+  flex: 1 1 200px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.card-label {
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  font-weight: 500;
 }
 
 /* --------------------------------------------------------------------------
@@ -1121,21 +1321,6 @@ textarea.input {
    11. Responsive
    -------------------------------------------------------------------------- */
 @media (max-width: 1023px) {
-  .layout {
-    grid-template-columns: 1fr;
-  }
-
-  .sidebar {
-    position: static;
-    padding: 0 0 var(--space-4);
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .sidebar ul {
-    flex-direction: row;
-    flex-wrap: wrap;
-  }
 
   /* 5 cells after the hero: 2 + 2 + 1, the last one takes the full row */
   .cards {
@@ -1146,34 +1331,88 @@ textarea.input {
     grid-column: 1 / -1;
   }
 
-  .nav-inner {
-    gap: var(--space-4);
+}
+
+@media (max-width: 1100px) {
+  .split {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  body.app {
+    height: auto;
+    overflow: visible;
+  }
+
+  .shell {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    min-height: 100dvh;
+    gap: var(--space-2);
+    padding: var(--space-2);
+  }
+
+  /* Sidebar becomes a compact scrolling strip: brand, nav, account */
+  .side {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .side-head {
+    padding: 0 var(--space-2) 0 var(--space-1);
+  }
+
+  .side-nav,
+  .side-foot {
+    display: flex;
+    align-items: center;
+  }
+
+  .side-nav .side-list,
+  .side-foot {
+    flex-direction: row;
+    gap: 2px;
+  }
+
+  .side-foot {
+    margin: 0 0 0 auto;
+    padding: 0;
+    border: 0;
+  }
+
+  .side-label,
+  .side-watch {
+    display: none;
+  }
+
+  .side-link {
+    width: auto;
+    white-space: nowrap;
+  }
+
+  .panel {
+    overflow: visible;
+  }
+
+  .panel-body {
+    overflow: visible;
+    padding: var(--space-4);
+  }
+
+  .topbar {
+    flex-wrap: wrap;
   }
 }
 
 @media (max-width: 640px) {
-  .container,
-  .nav-inner {
+  .container {
     padding-inline: var(--space-4);
-  }
-
-  /* Sticky nav wraps instead of overflowing on narrow screens. */
-  .nav-inner {
-    height: auto;
-    min-height: var(--nav-height);
-    flex-wrap: wrap;
-    gap: var(--space-2) var(--space-4);
-    padding-block: var(--space-2);
-  }
-
-  .nav-links {
-    flex-wrap: wrap;
-    row-gap: var(--space-1);
-  }
-
-  .nav-links a,
-  .nav-logout {
-    padding-block: var(--space-2);
   }
 
   /* One column: each metric breathes on a phone. */
@@ -1199,16 +1438,6 @@ textarea.input {
 
   .cards > .card-accent {
     padding-block: var(--space-5) var(--space-4);
-  }
-
-  .nav-links a {
-    padding-inline: var(--space-2);
-  }
-
-  .nav-links a[aria-current="page"]::after,
-  .nav-links a.active::after {
-    left: var(--space-2);
-    right: var(--space-2);
   }
 
   /* Wide tables scroll inside .table-wrap, never the page. */
@@ -1248,19 +1477,8 @@ textarea.input {
   to { opacity: 1; }
 }
 
-/* Entrée initiale des cartes, en cascade légère (6 max) */
-.cards > .card {
-  animation: card-rise 0.35s ease both;
-}
-.cards > .card:nth-child(2) { animation-delay: 0.04s; }
-.cards > .card:nth-child(3) { animation-delay: 0.08s; }
-.cards > .card:nth-child(4) { animation-delay: 0.12s; }
-.cards > .card:nth-child(5) { animation-delay: 0.16s; }
-.cards > .card:nth-child(6) { animation-delay: 0.2s; }
-@keyframes card-rise {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: none; }
-}
+/* No entrance animation on cards: HTMX swaps re-mount them every 30s,
+   so any entry animation would replay (and late-stagger cards look faded). */
 
 /* Directional flash for live ticks: brief, no layout shift. */
 .tick-up {

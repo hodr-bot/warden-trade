@@ -1,35 +1,16 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Warden Trade - Account</title>
-  {% include "_style.html" %}
-  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
-  <script src="/static/live.js?v=0.3.0" defer></script>
-</head>
-<body class="page">
-  <nav class="nav" aria-label="Primary">
-    <div class="nav-inner">
-      <a class="nav-brand" href="/"><span class="nav-brand-mark" aria-hidden="true"></span>Warden Trade</a>
-      <ul class="nav-links">
-        <li><a href="/">Dashboard</a></li>
-        <li><a href="/markets">Markets</a></li>
-        <li><a href="/orders">Orders</a></li>
-        <li><a href="/account" aria-current="page">Account</a></li>
-        <li><button class="nav-logout" id="logout" type="button">Logout</button></li>
-      </ul>
-    </div>
-  </nav>
+{% extends "base.html" %}
 
-  <main class="main container" id="account">
-    <div class="section-head">
-      <div>
-        <h1>Account</h1>
-        <p>Your sign-in and security settings.</p>
-      </div>
-    </div>
+{% block title %}Account{% endblock %}
+{% block nav_account %}aria-current="page"{% endblock %}
+{% block tab_title %}Account{% endblock %}
 
+{% block content %}
+<div id="account" class="view">
+  <div class="panel-bar">
+    <h1 class="panel-title">Account</h1>
+    <span class="muted">Your sign-in and security settings</span>
+  </div>
+  <div class="panel-body">
     <section class="section" aria-label="Profile">
       <div class="section-head">
         <div>
@@ -82,7 +63,11 @@
         <button class="btn btn-primary" type="submit" id="password-submit">Update password</button>
       </form>
     </section>
-  </main>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
 <script>
 (function () {
   // Show/hide toggles for the password fields. Pure DOM: secrets never
@@ -141,5 +126,4 @@
   });
 })();
 </script>
-</body>
-</html>
+{% endblock %}

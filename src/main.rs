@@ -1,5 +1,6 @@
 use axum::{routing::get, routing::post, Router};
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tracing_subscriber::EnvFilter;
 
 mod admin;
@@ -23,6 +24,7 @@ mod news;
 mod orchestrator;
 mod orders;
 mod paper;
+mod ratelimit;
 mod reconcile;
 mod risk;
 mod scheduler;
@@ -43,6 +45,18 @@ async fn main() {
     if let Err(e) = sqlx::migrate!("./migrations").run(&state.pool).await {
         tracing::warn!("migrations not applied, running degraded: {e}");
     }
+    let limiter = std::sync::Arc::new(ratelimit::RateLimiter::from_env());
+    // Auth endpoints burn an Argon2 hash per attempt: they get their own
+    // per-IP sliding window so unauthenticated CPU spend stays bounded.
+    // (429 + Retry-After when over budget.)
+    let auth_api = Router::new()
+        .route("/login", post(auth_routes::login_handler))
+        .route("/signup", post(auth_routes::signup_handler))
+        .route("/change-password", post(auth_routes::change_password_handler))
+        .route_layer(axum::middleware::from_fn_with_state(
+            limiter,
+            ratelimit::limit_auth,
+        ));
     let app = Router::new()
         .route("/health", get(health))
         .route("/", get(dashboard::dashboard_handler))
@@ -54,9 +68,7 @@ async fn main() {
         .route("/api/markets", get(markets::markets_handler))
         .route("/api/orders", get(orders::orders_handler).post(orders::create_order_handler))
         .route("/api/backtest", get(backtest::backtest_handler))
-        .route("/api/auth/login", post(auth_routes::login_handler))
-        .route("/api/auth/signup", post(auth_routes::signup_handler))
-        .route("/api/auth/change-password", post(auth_routes::change_password_handler))
+        .nest("/api/auth", auth_api)
         .route("/api/auth/logout", post(auth_routes::logout_handler))
         .route("/api/reconcile", get(reconcile::reconcile_handler))
         .route("/api/agents", get(orchestrator::agents_handler))
@@ -67,6 +79,22 @@ async fn main() {
         .route("/api/live/stream", get(live::stream_handler))
         .route("/api/admin/tenants", get(admin::admin_tenants_handler))
         .nest_service("/static", ServeDir::new("static"))
+        // Baseline hardening headers on every response, static files
+        // included. No CSP yet: the UI legitimately uses inline scripts and
+        // the unpkg htmx CDN, so a strict policy would break the app; the
+        // three headers below carry no such conflict.
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::X_CONTENT_TYPE_OPTIONS,
+            axum::http::HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::X_FRAME_OPTIONS,
+            axum::http::HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::REFERRER_POLICY,
+            axum::http::HeaderValue::from_static("same-origin"),
+        ))
         .with_state(state.clone());
     if scheduler::scheduler_enabled() {
         scheduler::spawn(state);
@@ -78,7 +106,10 @@ async fn main() {
     live::spawn_feed();
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     tracing::info!("listening on {addr}");
-    axum::serve(listener, app).await.unwrap();
+    // ConnectInfo feeds the auth rate limiter with the TCP peer address
+    // (used only when no Cloudflare/XFF header identifies the client).
+    let svc = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
+    axum::serve(listener, svc).await.unwrap();
 }
 
 #[cfg(test)]

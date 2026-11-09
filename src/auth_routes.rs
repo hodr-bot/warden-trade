@@ -11,6 +11,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
 
+/// Internal failure mapped to a generic message: the detail goes to the
+/// server log (tracing), never to the client. Auth endpoints must not leak
+/// schema, column, driver or template internals in error bodies.
+fn fail(status: StatusCode, what: &str, e: impl std::fmt::Display) -> (StatusCode, String) {
+    tracing::warn!("auth {what} degraded: {e}");
+    (status, "service unavailable".to_string())
+}
+
 fn admin_email() -> String {
     std::env::var("ADMIN_EMAIL").unwrap_or_else(|_| "admin@local".to_string())
 }
@@ -54,45 +62,50 @@ pub async fn login_handler(
     let tenant_id: uuid::Uuid = match sqlx::query("SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1")
         .fetch_optional(&state.pool)
         .await
-        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?
     {
         Some(row) => {
             use sqlx::Row;
             row.try_get("id")
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("tenant: {e}")))?
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "tenant", e))?
         }
         None => {
             let row = sqlx::query("INSERT INTO tenants (name) VALUES ('solo-admin') RETURNING id")
                 .fetch_one(&state.pool)
                 .await
-                .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?;
+                .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
             use sqlx::Row;
             row.try_get("id")
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("tenant: {e}")))?
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "tenant", e))?
         }
     };
 
     let admin_email_norm = admin_email().to_ascii_lowercase();
     let user_row = sqlx::query(
-        "SELECT id, password_hash FROM users WHERE tenant_id = $1 AND email = $2",
+        "SELECT id, password_hash, pwd_ver FROM users WHERE tenant_id = $1 AND email = $2",
     )
     .bind(tenant_id)
     .bind(&email)
     .fetch_optional(&state.pool)
     .await
-    .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?;
+    .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
 
-    let user_id: uuid::Uuid = match user_row {
+    let (user_id, pwd_ver): (uuid::Uuid, i32) = match user_row {
         Some(row) => {
             use sqlx::Row;
             let hash: String = row
                 .try_get("password_hash")
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("user: {e}")))?;
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
             if !crate::auth::verify_password(&hash, &req.password) {
                 return Err((StatusCode::UNAUTHORIZED, "invalid credentials".to_string()));
             }
-            row.try_get("id")
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("user: {e}")))?
+            let id: uuid::Uuid = row
+                .try_get("id")
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
+            let pv: i32 = row
+                .try_get("pwd_ver")
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
+            (id, pv)
         }
         None => {
             // Auto-provision only the configured admin email AND the configured
@@ -104,7 +117,7 @@ pub async fn login_handler(
                 return Err((StatusCode::UNAUTHORIZED, "invalid credentials".to_string()));
             }
             let hash = crate::auth::hash_password(&req.password)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("hash: {e}")))?;
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "hash", e))?;
             let row = sqlx::query(
                 "INSERT INTO users (tenant_id, email, password_hash, role) VALUES ($1, $2, $3, 'admin') RETURNING id",
             )
@@ -113,10 +126,12 @@ pub async fn login_handler(
             .bind(&hash)
             .fetch_one(&state.pool)
             .await
-            .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?;
+            .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
             use sqlx::Row;
-            row.try_get("id")
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("user: {e}")))?
+            let id: uuid::Uuid = row
+                .try_get("id")
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
+            (id, 0)
         }
     };
 
@@ -124,10 +139,11 @@ pub async fn login_handler(
     let token = crate::auth::encode_jwt(
         &user_id.to_string(),
         &tenant_id.to_string(),
+        pwd_ver,
         exp,
         state.jwt_secret.as_bytes(),
     )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("jwt: {e}")))?;
+    .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "jwt", e))?;
     let mut headers = axum::http::HeaderMap::new();
     let cookie = format!(
         "{}={token}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax",
@@ -156,6 +172,17 @@ pub async fn logout_handler() -> (axum::http::HeaderMap, Json<serde_json::Value>
     (headers, Json(serde_json::json!({"ok": true})))
 }
 
+/// Kill-switch for public registration. Open signup is `SIGNUP_ENABLED=1`
+/// ONLY: by default the route answers 404, because a new account lands in
+/// the solo tenant today and tenant isolation is the precondition for a
+/// safe public signup (one tenant per account, scheduler iterating over
+/// tenants). Agents cannot flip this: it is process env, not a DB flag.
+fn signup_enabled() -> bool {
+    matches!(
+        std::env::var("SIGNUP_ENABLED").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
 /// Minimum length for newly chosen passwords (signup + password change).
 /// Login keeps accepting whatever was set before: this bar only ever
 /// ratchets new secrets up, and agents cannot touch it (env-free const).
@@ -188,21 +215,21 @@ async fn solo_tenant_id(
     match sqlx::query("SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1")
         .fetch_optional(pool)
         .await
-        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?
     {
         Some(row) => {
             use sqlx::Row;
             row.try_get("id")
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("tenant: {e}")))
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "tenant", e))
         }
         None => {
             let row = sqlx::query("INSERT INTO tenants (name) VALUES ('solo-admin') RETURNING id")
                 .fetch_one(pool)
                 .await
-                .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?;
+                .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
             use sqlx::Row;
             row.try_get("id")
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("tenant: {e}")))
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "tenant", e))
         }
     }
 }
@@ -213,15 +240,17 @@ fn issue_session(
     state: &AppState,
     user_id: &uuid::Uuid,
     tenant_id: &uuid::Uuid,
+    pwd_ver: i32,
 ) -> Result<(axum::http::HeaderMap, String), (StatusCode, String)> {
     let exp = (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as usize;
     let token = crate::auth::encode_jwt(
         &user_id.to_string(),
         &tenant_id.to_string(),
+        pwd_ver,
         exp,
         state.jwt_secret.as_bytes(),
     )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("jwt: {e}")))?;
+    .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "jwt", e))?;
     let mut headers = axum::http::HeaderMap::new();
     let cookie = format!(
         "{}={token}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax",
@@ -250,6 +279,9 @@ pub async fn signup_handler(
     State(state): State<AppState>,
     Json(req): Json<SignupRequest>,
 ) -> Result<(StatusCode, axum::http::HeaderMap, Json<LoginResponse>), (StatusCode, String)> {
+    if !signup_enabled() {
+        return Err((StatusCode::NOT_FOUND, "not found".to_string()));
+    }
     let email = normalize_email(&req.email);
     if !valid_email(&email) {
         return Err((StatusCode::BAD_REQUEST, "valid email required".to_string()));
@@ -268,12 +300,12 @@ pub async fn signup_handler(
     .bind(&email)
     .fetch_one(&state.pool)
     .await
-    .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?;
+    .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
     if taken {
         return Err((StatusCode::CONFLICT, "email already registered".to_string()));
     }
     let hash = crate::auth::hash_password(&req.password)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("hash: {e}")))?;
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "hash", e))?;
     let row = sqlx::query(
         "INSERT INTO users (tenant_id, email, password_hash, role) VALUES ($1, $2, $3, 'member') RETURNING id",
     )
@@ -282,12 +314,13 @@ pub async fn signup_handler(
     .bind(&hash)
     .fetch_one(&state.pool)
     .await
-    .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?;
+    .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
     use sqlx::Row;
     let user_id: uuid::Uuid = row
         .try_get("id")
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("user: {e}")))?;
-    let (headers, token) = issue_session(&state, &user_id, &tenant_id)?;
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
+    // Fresh row: nobody rotated yet, so the session starts at version 0.
+    let (headers, token) = issue_session(&state, &user_id, &tenant_id, 0)?;
     Ok((StatusCode::CREATED, headers, Json(LoginResponse { token })))
 }
 
@@ -297,8 +330,12 @@ pub async fn signup_handler(
 pub struct SignupTemplate;
 
 /// `GET /signup` renders the registration form. Public, like `/login`.
-pub async fn signup_page_handler() -> axum::response::Html<String> {
-    axum::response::Html(SignupTemplate.render().unwrap_or_default())
+pub async fn signup_page_handler(
+) -> Result<axum::response::Html<String>, (StatusCode, String)> {
+    if !signup_enabled() {
+        return Err((StatusCode::NOT_FOUND, "not found".to_string()));
+    }
+    Ok(axum::response::Html(SignupTemplate.render().unwrap_or_default()))
 }
 
 /// Account data shown on the settings page. Never a hash, never a token.
@@ -330,20 +367,20 @@ pub async fn account_page_handler(
     .bind(tenant_id)
     .fetch_optional(&state.pool)
     .await
-    .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?;
+    .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
     let Some(row) = row else {
         return Err((StatusCode::NOT_FOUND, "account not found".to_string()));
     };
     use sqlx::Row;
     let email: String = row
         .try_get("email")
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("user: {e}")))?;
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
     let role: String = row
         .try_get("role")
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("user: {e}")))?;
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
     let created: chrono::DateTime<chrono::Utc> = row
         .try_get("created_at")
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("user: {e}")))?;
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
     let page = AccountTemplate {
         email,
         role,
@@ -391,14 +428,14 @@ pub async fn change_password_handler(
         .bind(tenant_id)
         .fetch_optional(&state.pool)
         .await
-        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?;
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
     let Some(row) = row else {
         return Err((StatusCode::NOT_FOUND, "account not found".to_string()));
     };
     use sqlx::Row;
     let hash: String = row
         .try_get("password_hash")
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("user: {e}")))?;
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
     if !crate::auth::verify_password(&hash, &req.current_password) {
         return Err((StatusCode::UNAUTHORIZED, "current password is wrong".to_string()));
     }
@@ -409,14 +446,16 @@ pub async fn change_password_handler(
         ));
     }
     let new_hash = crate::auth::hash_password(&req.new_password)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("hash: {e}")))?;
-    sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2 AND tenant_id = $3")
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "hash", e))?;
+    // The version bump invalidates every previously issued token: their
+    // embedded `pv` no longer matches the row, so extractors reject them.
+    sqlx::query("UPDATE users SET password_hash = $1, pwd_ver = pwd_ver + 1 WHERE id = $2 AND tenant_id = $3")
         .bind(&new_hash)
         .bind(user_id)
         .bind(tenant_id)
         .execute(&state.pool)
         .await
-        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("db: {e}")))?;
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -462,17 +501,52 @@ mod page_tests {
         assert!(html.contains("window.location.href = \"/\""), "login must redirect to the dashboard");
         assert!(!html.contains("localStorage"), "session must live in the HttpOnly cookie, not localStorage");
         assert!(html.contains("password-eye"), "login must offer a show/hide password toggle");
-        assert!(html.contains("/signup"), "login must link to the signup page");
+        assert!(!html.contains("/signup"), "login must not advertise signup while it is closed");
     }
 
     #[tokio::test]
     async fn signup_page_renders_form_without_db() {
-        let axum::response::Html(html) = signup_page_handler().await;
+        let _lock = signup_test_lock();
+        let prev = std::env::var("SIGNUP_ENABLED").ok();
+        std::env::set_var("SIGNUP_ENABLED", "1");
+        let res = signup_page_handler().await;
+        restore_signup_env(prev);
+        let axum::response::Html(html) = res.expect("signup page renders when enabled");
         assert!(html.contains("<form"), "signup page must render a form");
         assert!(html.contains("/api/auth/signup"), "form must target the signup API");
         assert!(html.contains("password-eye"), "signup must offer a show/hide password toggle");
         assert!(html.contains("/login"), "signup must link back to sign-in");
         assert!(!html.contains("localStorage"), "session must live in the HttpOnly cookie, not localStorage");
+    }
+
+    #[tokio::test]
+    async fn signup_closed_by_default() {
+        let _lock = signup_test_lock();
+        let prev = std::env::var("SIGNUP_ENABLED").ok();
+        std::env::remove_var("SIGNUP_ENABLED");
+        let page = signup_page_handler().await;
+        assert!(
+            matches!(page, Err((StatusCode::NOT_FOUND, _))),
+            "signup page must 404 unless SIGNUP_ENABLED=1"
+        );
+        restore_signup_env(prev);
+    }
+
+    /// Serializes the env-flag tests: `SIGNUP_ENABLED` is process-global.
+    pub(super) fn signup_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        // Poison-tolerant: a panicking holder (e.g. a failed signup attempt)
+        // must not cascade into every other serialized test.
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(super) fn restore_signup_env(prev: Option<String>) {
+        match prev {
+            Some(v) => std::env::set_var("SIGNUP_ENABLED", v),
+            None => std::env::remove_var("SIGNUP_ENABLED"),
+        }
     }
 
     #[tokio::test]
@@ -547,7 +621,13 @@ mod account_flow_tests {
 
     #[tokio::test]
     async fn signup_login_change_password_roundtrip() {
-        let Some(state) = proof_state() else { return };
+        let _lock = super::page_tests::signup_test_lock();
+        let prev = std::env::var("SIGNUP_ENABLED").ok();
+        std::env::set_var("SIGNUP_ENABLED", "1");
+        let Some(state) = proof_state() else {
+            super::page_tests::restore_signup_env(prev);
+            return;
+        };
         let email = format!("flow{}@example.com", chrono::Utc::now().timestamp_millis());
 
         // Signup creates the account and logs in immediately (201 + cookie).
@@ -622,7 +702,7 @@ mod account_flow_tests {
         assert_eq!(ok, serde_json::json!({ "ok": true }));
 
         // New password logs in, old password is dead.
-        login_handler(
+        let _ = login_handler(
             State(state.clone()),
             Json(LoginRequest { email: email.clone(), password: "brand-new-horse-10".to_string() }),
         )
@@ -634,5 +714,19 @@ mod account_flow_tests {
         )
         .await;
         assert!(matches!(stale, Err((StatusCode::UNAUTHORIZED, _))), "old password must die, got {stale:?}");
+
+        // The pre-rotation token is dead too: its embedded `pv` no longer
+        // matches the bumped row, so the extractor rejects it.
+        use axum::body::Body;
+        use axum::extract::FromRequestParts;
+        let req = axum::http::Request::builder()
+            .uri("/")
+            .header("Cookie", format!("warden_token={}", login.token))
+            .body(Body::empty())
+            .unwrap();
+        let (mut parts, _) = req.into_parts();
+        let rejected = crate::state::Tenant::from_request_parts(&mut parts, &state).await;
+        assert!(rejected.is_err(), "stale token must not authenticate after rotation");
+        super::page_tests::restore_signup_env(prev);
     }
 }

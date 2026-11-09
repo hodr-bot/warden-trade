@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 pub struct Claims {
     pub sub: String,
     pub tenant_id: String,
+    /// Password version at issue time. `default` keeps pre-0007 tokens
+    /// decodable: they carry pv 0, which still matches any never-rotated row.
+    #[serde(default)]
+    pub pv: i32,
     pub exp: usize,
 }
 
@@ -40,12 +44,14 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
 pub fn encode_jwt(
     user_id: &str,
     tenant_id: &str,
+    pwd_ver: i32,
     exp: usize,
     secret: &[u8],
 ) -> Result<String, jsonwebtoken::errors::Error> {
     let claims = Claims {
         sub: user_id.to_owned(),
         tenant_id: tenant_id.to_owned(),
+        pv: pwd_ver,
         exp,
     };
     let header = Header::new(Algorithm::HS256);
@@ -119,7 +125,7 @@ mod tests {
         let tenant_id = "22222222-2222-4222-8222-222222222222";
         let exp = future_exp();
 
-        let token = encode_jwt(user_id, tenant_id, exp, secret).expect("encode must succeed");
+        let token = encode_jwt(user_id, tenant_id, 0, exp, secret).expect("encode must succeed");
         assert_eq!(
             token.matches('.').count(),
             2,
