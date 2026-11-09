@@ -239,7 +239,13 @@ async fn tick_symbol(
     if last_side(&state.pool, tenant_id, symbol).await.as_deref() == Some(side) {
         return format!("{symbol} skipped: already positioned {side}");
     }
-    let qty = sized_qty(&closes, price);
+    let base_qty = sized_qty(&closes, price);
+    // Empirical calibration: shrink entries on symbols whose measured
+    // edge is negative. Shrink-only (never above base), buys only — sells
+    // and protective exits always close the full position.
+    let edge = crate::calibration::calibration_for(&state.pool, tenant_id, symbol).await;
+    let edge_mult = crate::calibration::multiplier(&edge);
+    let qty = base_qty * edge_mult;
     if qty <= 0.0 {
         return format!("{symbol} skipped: no size to trade");
     }
@@ -257,7 +263,7 @@ async fn tick_symbol(
     )
     .await
     {
-        Ok(order) => format!("{symbol} placed {side} {} @ {:.2} (id {})", order.qty, order.price, order.id),
+        Ok(order) => format!("{symbol} placed {side} {} @ {:.2} (id {}) [cal {}]", order.qty, order.price, order.id, crate::calibration::describe(&edge)),
         Err((status, msg)) => format!("{symbol} order rejected ({status}): {msg}"),
     }
 }

@@ -9,6 +9,7 @@ mod auth_routes;
 mod agents;
 mod autonomy;
 mod backtest;
+mod calibration;
 mod coinbase;
 mod dashboard;
 mod equity;
