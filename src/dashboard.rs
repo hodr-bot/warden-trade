@@ -590,6 +590,7 @@ mod tests {
             pool: sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/none")
                 .expect("test lazy pool"),
             jwt_secret: "test".to_string(),
+            order_gate: Default::default(),
         };
         let page = crate::state::AuthPage(crate::state::Tenant {
             tenant_id: "00000000-0000-0000-0000-000000000001".to_string(),

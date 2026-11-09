@@ -97,7 +97,16 @@ async fn main() {
         ))
         .with_state(state.clone());
     if scheduler::scheduler_enabled() {
-        scheduler::spawn(state);
+        // Trailing-stop peaks survive restarts via `exit_peaks`: seed the
+        // in-memory map ONCE here, before either evaluation loop starts.
+        // (Later seeding would clobber live peaks with stale rows.)
+        // Best effort: a seeding failure only means peaks restart fresh.
+        match scheduler::solo_tenant(&state.pool).await {
+            Some(t) => crate::exits::seed_exit_peaks(&state.pool, t).await,
+            None => tracing::info!("no tenant yet: exit peaks start empty"),
+        }
+        scheduler::spawn(state.clone());
+        scheduler::spawn_exit_watch(state.clone());
     } else {
         tracing::info!("scheduler off (SCHEDULER_ENABLED=false)");
     }

@@ -108,97 +108,142 @@ pub fn fifo_realized_since(fills: &[(String, f64, f64, i64)], day_start_ts: i64)
 
 /// Net held quantity of `symbol` for `tenant_id` (buys minus sells).
 ///
-/// Read-only. Unreadable database degrades to `0.0` with a warning: the
-/// hard notional/kill-switch floor in [`check_order`] still applies, so a
-/// blind DB never means unlimited orders.
-pub async fn net_qty_for(pool: &sqlx::PgPool, tenant_id: uuid::Uuid, symbol: &str) -> f64 {
-    let row = sqlx::query(
+/// Read-only. J2 fail-closed: a database error is returned to the caller
+/// instead of degrading to `0.0` — the gate turns an unreadable ledger
+/// into denied buys (sells stay allowed so exits are never trapped).
+pub async fn net_qty_for<'e, E>(
+    ex: E,
+    tenant_id: uuid::Uuid,
+    symbol: &str,
+) -> Result<f64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let row: Option<(Option<f64>,)> = sqlx::query_as(
         "SELECT COALESCE(SUM(CASE WHEN side = 'buy' THEN qty ELSE -qty END), 0.0) AS net
          FROM paper_orders WHERE tenant_id = $1 AND symbol = $2",
     )
     .bind(tenant_id)
     .bind(symbol)
-    .fetch_optional(pool)
-    .await;
-    match row {
-        Ok(Some(r)) => {
-            use sqlx::Row;
-            r.try_get("net").unwrap_or(0.0)
-        }
-        Ok(None) => 0.0,
-        Err(e) => {
-            tracing::warn!("net_qty_for unreadable, assuming flat: {e}");
-            0.0
-        }
-    }
+    .fetch_optional(ex)
+    .await?;
+    Ok(row.and_then(|r| r.0).unwrap_or(0.0))
 }
 
 /// Count of symbols with a non-flat net position for `tenant_id`.
 ///
-/// Read-only. Unreadable database degrades to `0` with a warning (same
-/// rationale as [`net_qty_for`]).
-pub async fn open_position_count(pool: &sqlx::PgPool, tenant_id: uuid::Uuid) -> u32 {
-    let rows = sqlx::query(
+/// Read-only. J2 fail-closed: errors propagate (see [`net_qty_for`]).
+pub async fn open_position_count<'e, E>(
+    ex: E,
+    tenant_id: uuid::Uuid,
+) -> Result<u32, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let rows: Vec<(Option<f64>,)> = sqlx::query_as(
         "SELECT COALESCE(SUM(CASE WHEN side = 'buy' THEN qty ELSE -qty END), 0.0) AS net
          FROM paper_orders WHERE tenant_id = $1 GROUP BY symbol",
     )
     .bind(tenant_id)
-    .fetch_all(pool)
-    .await;
-    match rows {
-        Ok(rows) => {
-            use sqlx::Row;
-            rows.iter()
-                .filter(|r| r.try_get::<f64, _>("net").unwrap_or(0.0).abs() > FLAT_EPS)
-                .count() as u32
-        }
-        Err(e) => {
-            tracing::warn!("open_position_count unreadable, assuming none: {e}");
-            0
-        }
-    }
+    .fetch_all(ex)
+    .await?;
+    Ok(rows
+        .iter()
+        .filter(|r| r.0.unwrap_or(0.0).abs() > FLAT_EPS)
+        .count() as u32)
 }
 
 /// Realized PnL since `day_start_ts` (epoch seconds) across all symbols.
 ///
 /// FIFO per symbol: earlier sells still consume lots for a correct cost
-/// basis, only closes on/after the threshold count. Read-only; unreadable
-/// database degrades to `0.0` with a warning (same rationale as
-/// [`net_qty_for`]).
-pub async fn realized_since(pool: &sqlx::PgPool, tenant_id: uuid::Uuid, day_start_ts: i64) -> f64 {
-    let rows = sqlx::query(
+/// basis, only closes on/after the threshold count. Read-only; J2
+/// fail-closed: errors propagate (see [`net_qty_for`]).
+pub async fn realized_since<'e, E>(
+    ex: E,
+    tenant_id: uuid::Uuid,
+    day_start_ts: i64,
+) -> Result<f64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let rows: Vec<(String, String, f64, f64, i64)> = sqlx::query_as(
         "SELECT symbol, side, qty, price, extract(epoch FROM created_at)::BIGINT AS ts
          FROM paper_orders WHERE tenant_id = $1 ORDER BY created_at ASC",
     )
     .bind(tenant_id)
-    .fetch_all(pool)
-    .await;
-    let rows = match rows {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("realized_since unreadable, assuming zero: {e}");
-            return 0.0;
-        }
-    };
-    use sqlx::Row;
+    .fetch_all(ex)
+    .await?;
     use std::collections::BTreeMap;
     let mut by_symbol: BTreeMap<String, Vec<(String, f64, f64, i64)>> = BTreeMap::new();
-    for r in &rows {
-        let symbol: String = r.try_get("symbol").unwrap_or_default();
+    for (symbol, side, qty, price, ts) in rows {
         if symbol.is_empty() {
             continue;
         }
-        by_symbol.entry(symbol).or_default().push((
-            r.try_get("side").unwrap_or_else(|_| "buy".to_string()),
-            r.try_get("qty").unwrap_or(0.0),
-            r.try_get("price").unwrap_or(0.0),
-            r.try_get("ts").unwrap_or(0),
-        ));
+        by_symbol.entry(symbol).or_default().push((side, qty, price, ts));
     }
-    by_symbol
+    Ok(by_symbol
         .values()
         .map(|fills| fifo_realized_since(fills, day_start_ts))
-        .sum()
+        .sum())
+}
+
+/// Unrealized PnL of open longs marked to `marks` (J2: the daily-loss gate
+/// no longer counts realized closes only).
+///
+/// Per symbol: `(mark - average entry) x net long qty` via the same FIFO
+/// cost basis as the dashboard. Symbols with no fresh mark are skipped
+/// (never hallucinated); net-short/flat symbols contribute nothing.
+/// Read-only; J2 fail-closed: errors propagate.
+pub async fn open_unrealized<'e, E>(
+    ex: E,
+    tenant_id: uuid::Uuid,
+    marks: &std::collections::BTreeMap<String, f64>,
+) -> Result<f64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let rows: Vec<(String, String, f64, f64)> = sqlx::query_as(
+        "SELECT symbol, side, qty, price FROM paper_orders WHERE tenant_id = $1 ORDER BY created_at ASC",
+    )
+    .bind(tenant_id)
+    .fetch_all(ex)
+    .await?;
+    use std::collections::BTreeMap;
+    let mut by_symbol: BTreeMap<String, Vec<(String, f64, f64)>> = BTreeMap::new();
+    for (symbol, side, qty, price) in rows {
+        if symbol.is_empty() {
+            continue;
+        }
+        by_symbol.entry(symbol).or_default().push((side, qty, price));
+    }
+    let mut total = 0.0;
+    for (symbol, fills) in &by_symbol {
+        let (qty, avg) = crate::dashboard::long_position(fills);
+        if qty > FLAT_EPS {
+            if let Some(mark) = marks.get(symbol) {
+                if mark.is_finite() && *mark > 0.0 {
+                    total += (mark - avg) * qty;
+                }
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// Server-side execution price for `symbol` from the live marks feed.
+///
+/// J2 ("prix client"): manual orders must never trust the price posted by
+/// the caller — fills execute at the feed's mark. `None` when the feed has
+/// no fresh mark: the caller must refuse the order (`503`) instead of
+/// inventing a price. Pure in `marks` so tests pin exact behavior.
+pub fn resolve_execution_price(
+    marks: &std::collections::BTreeMap<String, f64>,
+    symbol: &str,
+) -> Option<f64> {
+    marks
+        .get(symbol)
+        .copied()
+        .filter(|p| p.is_finite() && *p > 0.0)
 }
 
 /// Start of the UTC day containing `now_ts`, as epoch seconds
@@ -215,8 +260,19 @@ pub fn utc_day_start_ts(now_ts: i64) -> i64 {
 /// - too many distinct open positions → reject;
 /// - resulting exposure (`held + qty` at intent price) over
 ///   `max_exposure_per_asset` → reject;
-/// - today's realized PnL worse than `-max_daily_loss` → reject (entries
-///   only: exits/sells always stay allowed so a losing day can be cut).
+/// - today's realized PnL **plus unrealized open positions** (marked to
+///   `marks`, J2) worse than `-max_daily_loss` → reject (entries only:
+///   exits/sells always stay allowed so a losing day can be cut).
+///
+/// J2 fail-closed: when any ledger read fails, **buys are denied**
+/// (`risk data unavailable`) while **sells stay allowed** — a blind
+/// ledger must never authorize new exposure, and must never trap an
+/// open position by blocking its exit. The ledger readers accept any
+/// executor; [`check_order_full`] takes the pool (see
+/// [`crate::orders::place_paper_order`], which serializes
+/// gate and insert behind a process-local per-app mutex so concurrent
+/// ticks and API calls cannot both pass the gate on the same ledger
+/// state — the deployment runs a single writer process).
 ///
 /// `sell` intents only face the hard floor: never block an exit.
 pub async fn check_order_full(
@@ -224,14 +280,23 @@ pub async fn check_order_full(
     tenant_id: uuid::Uuid,
     limits: &RiskLimits,
     intent: &OrderIntent,
+    marks: &std::collections::BTreeMap<String, f64>,
 ) -> Result<(), String> {
     check_order(limits, intent)?;
     if intent.side != "buy" {
         return Ok(());
     }
-    let held = net_qty_for(pool, tenant_id, &intent.symbol).await;
+    let held = net_qty_for(pool, tenant_id, &intent.symbol)
+        .await
+        .map_err(|e| {
+            tracing::warn!("risk gate blind on net_qty_for, denying buy: {e}");
+            "risk data unavailable: buys blocked".to_string()
+        })?;
     if held.abs() <= FLAT_EPS {
-        let open = open_position_count(pool, tenant_id).await;
+        let open = open_position_count(pool, tenant_id).await.map_err(|e| {
+            tracing::warn!("risk gate blind on open_position_count, denying buy: {e}");
+            "risk data unavailable: buys blocked".to_string()
+        })?;
         if open >= limits.max_open_orders {
             return Err(format!(
                 "too many open positions ({open} >= {})",
@@ -246,10 +311,19 @@ pub async fn check_order_full(
             limits.max_exposure_per_asset
         ));
     }
-    let today = realized_since(pool, tenant_id, utc_day_start_ts(chrono::Utc::now().timestamp())).await;
-    if today < -limits.max_daily_loss {
+    let today = realized_since(pool, tenant_id, utc_day_start_ts(chrono::Utc::now().timestamp()))
+        .await
+        .map_err(|e| {
+            tracing::warn!("risk gate blind on realized_since, denying buy: {e}");
+            "risk data unavailable: buys blocked".to_string()
+        })?;
+    let floating = open_unrealized(pool, tenant_id, marks).await.map_err(|e| {
+        tracing::warn!("risk gate blind on open_unrealized, denying buy: {e}");
+        "risk data unavailable: buys blocked".to_string()
+    })?;
+    if today + floating < -limits.max_daily_loss {
         return Err(format!(
-            "daily loss {today:.2} exceeds max_daily_loss {}: sells only",
+            "daily loss {today:.2} + unrealized {floating:.2} exceeds max_daily_loss {}: sells only",
             limits.max_daily_loss
         ));
     }
@@ -477,6 +551,85 @@ mod tests {
         }
     }
 
+    /// Gate wrapper with an empty marks map (no unrealized leg).
+    async fn gate_proof(
+        pool: &sqlx::PgPool,
+        t: uuid::Uuid,
+        lim: &RiskLimits,
+        intent: &OrderIntent,
+    ) -> Result<(), String> {
+        check_order_full(pool, t, lim, intent, &std::collections::BTreeMap::new()).await
+    }
+
+    fn marks_of(pairs: &[(&str, f64)]) -> std::collections::BTreeMap<String, f64> {
+        pairs.iter().map(|(s, p)| (s.to_string(), *p)).collect()
+    }
+
+    #[test]
+    fn execution_price_resolves_only_fresh_marks() {
+        let marks = marks_of(&[("BTC-USD", 70_000.0)]);
+        assert_eq!(resolve_execution_price(&marks, "BTC-USD"), Some(70_000.0));
+        // Unknown symbol: no price is invented.
+        assert_eq!(resolve_execution_price(&marks, "ETH-USD"), None);
+        // Degenerate marks are not prices.
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let m = marks_of(&[("BTC-USD", bad)]);
+            assert_eq!(resolve_execution_price(&m, "BTC-USD"), None, "bad mark {bad}");
+        }
+        assert_eq!(
+            resolve_execution_price(&std::collections::BTreeMap::new(), "BTC-USD"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_closed_buy_denied_sell_allowed_without_db() {
+        // Unreachable ledger: buys must be denied, sells stay allowed.
+        let pool = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/none")
+            .expect("lazy pool must build");
+        let lim = wide_limits();
+        let t = uuid::Uuid::new_v4();
+        let err = check_order_full(
+            &pool,
+            t,
+            &lim,
+            &proof_intent("BTC-USD", "buy", 0.01, 70_000.0),
+            &std::collections::BTreeMap::new(),
+        )
+        .await
+        .expect_err("blind-ledger buy must be denied");
+        assert!(err.contains("risk data unavailable"), "unexpected: {err}");
+        check_order_full(
+            &pool,
+            t,
+            &lim,
+            &proof_intent("BTC-USD", "sell", 0.01, 70_000.0),
+            &std::collections::BTreeMap::new(),
+        )
+        .await
+        .expect("blind-ledger sell must stay allowed");
+    }
+
+    #[tokio::test]
+    async fn db_unrealized_counts_toward_daily_loss() {
+        let Some(pool) = proof_pool().await else { return };
+        let t = proof_tenant(&pool, "max_daily_loss", "10").await;
+        // Open long 1 BTC @ 100, mark 40 → unrealized -60, beyond the 10 limit.
+        proof_fill(&pool, t, "BTC-USD", "buy", 1.0, 100.0).await;
+        let mut lim = wide_limits();
+        lim.max_daily_loss = 10.0;
+        let marks = marks_of(&[("BTC-USD", 40.0)]);
+        let err = check_order_full(&pool, t, &lim, &proof_intent("ETH-USD", "buy", 1.0, 2000.0), &marks)
+            .await
+            .expect_err("buy with deep unrealized loss must be rejected");
+        assert!(err.contains("daily loss"), "unexpected: {err}");
+        // Same ledger, mark above water → buys allowed again.
+        let marks = marks_of(&[("BTC-USD", 100.0)]);
+        check_order_full(&pool, t, &lim, &proof_intent("ETH-USD", "buy", 1.0, 2000.0), &marks)
+            .await
+            .expect("buy with flat unrealized must pass");
+    }
+
     #[tokio::test]
     async fn db_exposure_gate_blocks_overweight_buy() {
         let Some(pool) = proof_pool().await else { return };
@@ -487,12 +640,12 @@ mod tests {
         let mut lim = wide_limits();
         lim.max_exposure_per_asset = 1000.0;
         // 700 + 700 = 1400 > 1000 → blocked.
-        let err = check_order_full(&pool, t, &lim, &proof_intent("BTC-USD", "buy", 0.01, 70_000.0))
+        let err = gate_proof(&pool, t, &lim, &proof_intent("BTC-USD", "buy", 0.01, 70_000.0))
             .await
             .expect_err("overweight buy must be rejected");
         assert!(err.contains("exposure"), "unexpected: {err}");
         // 700 + 280 = 980 <= 1000 → allowed.
-        check_order_full(&pool, t, &lim, &proof_intent("BTC-USD", "buy", 0.004, 70_000.0))
+        gate_proof(&pool, t, &lim, &proof_intent("BTC-USD", "buy", 0.004, 70_000.0))
             .await
             .expect("light buy within exposure must pass");
     }
@@ -506,12 +659,12 @@ mod tests {
         let mut lim = wide_limits();
         lim.max_open_orders = 1;
         // Second symbol while one position is open → blocked.
-        let err = check_order_full(&pool, t, &lim, &proof_intent("ETH-USD", "buy", 1.0, 2000.0))
+        let err = gate_proof(&pool, t, &lim, &proof_intent("ETH-USD", "buy", 1.0, 2000.0))
             .await
             .expect_err("second position must be rejected");
         assert!(err.contains("open positions"), "unexpected: {err}");
         // Same symbol (augmenting, exposure wide open) → allowed.
-        check_order_full(&pool, t, &lim, &proof_intent("BTC-USD", "buy", 0.001, 70_000.0))
+        gate_proof(&pool, t, &lim, &proof_intent("BTC-USD", "buy", 0.001, 70_000.0))
             .await
             .expect("augmenting the open position must pass");
     }
@@ -526,12 +679,12 @@ mod tests {
 
         let mut lim = wide_limits();
         lim.max_daily_loss = 10.0;
-        let err = check_order_full(&pool, t, &lim, &proof_intent("BTC-USD", "buy", 0.1, 60.0))
+        let err = gate_proof(&pool, t, &lim, &proof_intent("BTC-USD", "buy", 0.1, 60.0))
             .await
             .expect_err("buy after daily loss must be rejected");
         assert!(err.contains("daily loss"), "unexpected: {err}");
         // Exits stay open: never trap a position because the day went red.
-        check_order_full(&pool, t, &lim, &proof_intent("BTC-USD", "sell", 0.1, 60.0))
+        gate_proof(&pool, t, &lim, &proof_intent("BTC-USD", "sell", 0.1, 60.0))
             .await
             .expect("sells must stay allowed after daily loss");
     }

@@ -394,6 +394,7 @@ mod tests {
             pool: sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/none")
                 .expect("test lazy pool"),
             jwt_secret: "test".to_string(),
+            order_gate: Default::default(),
         };
         assert!(tick_advisor(&state).await.is_none());
     }

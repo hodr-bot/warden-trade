@@ -169,12 +169,100 @@ pub fn check_exit(symbol: &str, price: f64, position: Option<Position>) -> ExitC
 
 /// Mark a protective exit so the next ticks cool down instead of
 /// re-entering on the same signal. Used after a sell is placed.
+///
+/// REMOVED (J2): [`check_exit`] already arms the cooldown when it
+/// decides to exit — the old call site ran BEFORE the order was placed,
+/// hiding a failed exit behind a cooldown ("note_exit précoce").
+/// Production paths use [`release_cooldown`] on failure instead.
+#[allow(dead_code)]
 pub fn note_exit(symbol: &str) {
     let cooldown_ticks = env_u32("EXIT_COOLDOWN_TICKS", 3);
     let mut guard = state().lock().expect("exit state");
     let entry = guard.entry(symbol.to_string()).or_default();
     entry.peak = 0.0;
     entry.cooldown_left = cooldown_ticks;
+}
+
+/// Release the cooldown for `symbol` without touching the peak.
+///
+/// J2 ("note_exit précoce", failed-exit blindness): when a protective
+/// exit is decided but its order is rejected, the cooldown armed by
+/// [`check_exit`] would suppress re-evaluation for ticks while the
+/// losing position is still open. Releasing it makes the next
+/// evaluation retry the exit immediately.
+pub fn release_cooldown(symbol: &str) {
+    let mut guard = state().lock().expect("exit state");
+    if let Some(entry) = guard.get_mut(symbol) {
+        entry.cooldown_left = 0;
+    }
+}
+
+/// Current trailing peak for `symbol`, 0 when flat/unknown.
+/// Read by the scheduler to persist peaks across restarts (J2).
+pub fn peak_for(symbol: &str) -> f64 {
+    state()
+        .lock()
+        .expect("exit state")
+        .get(symbol)
+        .map(|s| s.peak)
+        .unwrap_or(0.0)
+}
+
+/// Persist the in-memory trailing peak of `symbol` for `tenant_id` (J2:
+/// "trailing static perdu").
+///
+/// Upserts the peak; deletes the row when the peak is back to 0
+/// (position exited). Never fails the caller: a peak row is an
+/// optimization, not the ledger — errors are logged and dropped.
+pub async fn persist_peak(pool: &sqlx::PgPool, tenant_id: uuid::Uuid, symbol: &str) {
+    let peak = peak_for(symbol);
+    let res = if peak > 0.0 {
+        sqlx::query(
+            "INSERT INTO exit_peaks (tenant_id, symbol, peak) VALUES ($1, $2, $3)
+             ON CONFLICT (tenant_id, symbol) DO UPDATE SET peak = EXCLUDED.peak, updated_at = NOW()",
+        )
+        .bind(tenant_id)
+        .bind(symbol)
+        .bind(peak)
+        .execute(pool)
+        .await
+        .map(|_| ())
+    } else {
+        sqlx::query("DELETE FROM exit_peaks WHERE tenant_id = $1 AND symbol = $2")
+            .bind(tenant_id)
+            .bind(symbol)
+            .execute(pool)
+            .await
+            .map(|_| ())
+    };
+    if let Err(e) = res {
+        tracing::warn!("exit peak persist failed for {symbol}: {e}");
+    }
+}
+
+/// Re-seed in-memory trailing peaks from the database (J2).
+///
+/// Call ONCE at boot before the evaluation loops start (see `main.rs`):
+/// a restart then resumes the trailing stop from the pre-restart rally
+/// high instead of the entry average. Later calls would clobber live
+/// peaks with stale rows, so loops must never call this.
+pub async fn seed_exit_peaks(pool: &sqlx::PgPool, tenant_id: uuid::Uuid) {
+    let rows: Result<Vec<(String, f64)>, _> =
+        sqlx::query_as("SELECT symbol, peak FROM exit_peaks WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .fetch_all(pool)
+            .await;
+    match rows {
+        Ok(rows) => {
+            let mut guard = state().lock().expect("exit state");
+            for (symbol, peak) in rows {
+                if peak > 0.0 {
+                    guard.entry(symbol).or_default().peak = peak;
+                }
+            }
+        }
+        Err(e) => tracing::warn!("exit peak seeding failed, peaks restart fresh: {e}"),
+    }
 }
 
 /// Current cooldown for `symbol`, 0 when free to trade.
@@ -201,17 +289,24 @@ pub fn cap_sell_qty(sized: f64, held: f64) -> f64 {
     }
 }
 
+/// Process-wide serializer for tests that touch the exit state map or the
+/// exit env vars (`STOP_LOSS_PCT`, `TAKE_PROFIT_PCT`, `TRAILING_STOP`,
+/// `EXIT_COOLDOWN_TICKS`).
+///
+/// `std::env` and the `EXIT_STATE` map are process-global: per-module
+/// locks do NOT exclude each other, so a scheduler `tick` test calling
+/// [`check_exit`] can corrupt an exits test mid-assertion (and a panic
+/// then poisons the module lock and cascades). Every test in every
+/// module that evaluates exits must hold this — see J2 flake 2026-11-09.
+#[cfg(test)]
+pub(crate) fn test_serial_lock() -> std::sync::MutexGuard<'static, ()> {
+    static TEST_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+    TEST_SERIAL.get_or_init(|| Mutex::new(())).lock().expect("test lock")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::OnceLock;
-
-    /// Serializes env-mutating tests inside this module (no external crate).
-    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn lock() -> std::sync::MutexGuard<'static, ()> {
-        TEST_LOCK.get_or_init(|| Mutex::new(())).lock().expect("test lock")
-    }
 
     fn pos(qty: f64, avg: f64) -> Option<Position> {
         Some(Position { qty, avg })
@@ -219,7 +314,7 @@ mod tests {
 
     #[test]
     fn no_short_selling() {
-        let _guard = lock();
+        let _guard = test_serial_lock();
         reset_exit_state();
         // Flat: nothing to sell, whatever the signal sizes.
         assert_eq!(cap_sell_qty(1.5, 0.0), 0.0);
@@ -234,7 +329,7 @@ mod tests {
     fn per_symbol_marks_never_cross() {
         use crate::dashboard::value_positions;
         use std::collections::BTreeMap;
-        let _guard = lock();
+        let _guard = test_serial_lock();
         // The live -$84k bug: a SOL short valued at BTC's mark.
         let mut by: BTreeMap<String, Vec<(String, f64, f64)>> = BTreeMap::new();
         by.insert(
@@ -264,7 +359,7 @@ mod tests {
 
     #[test]
     fn default_stop_is_two_percent() {
-        let _guard = lock();
+        let _guard = test_serial_lock();
         reset_exit_state();
         // Empty string does not parse: falls back to the compiled default.
         std::env::set_var("STOP_LOSS_PCT", "");
@@ -285,7 +380,7 @@ mod tests {
 
     #[test]
     fn flat_position_never_exits() {
-        let _guard = lock();
+        let _guard = test_serial_lock();
         reset_exit_state();
         std::env::set_var("STOP_LOSS_PCT", "0.10");
         std::env::set_var("TAKE_PROFIT_PCT", "0.05");
@@ -300,7 +395,7 @@ mod tests {
 
     #[test]
     fn fixed_stop_fires_below_band() {
-        let _guard = lock();
+        let _guard = test_serial_lock();
         reset_exit_state();
         std::env::set_var("STOP_LOSS_PCT", "0.10");
         std::env::set_var("TAKE_PROFIT_PCT", "0.0");
@@ -321,7 +416,7 @@ mod tests {
 
     #[test]
     fn take_profit_fires_above_band() {
-        let _guard = lock();
+        let _guard = test_serial_lock();
         reset_exit_state();
         std::env::set_var("STOP_LOSS_PCT", "0.0");
         std::env::set_var("TAKE_PROFIT_PCT", "0.05");
@@ -338,7 +433,7 @@ mod tests {
 
     #[test]
     fn trailing_stop_follows_the_peak() {
-        let _guard = lock();
+        let _guard = test_serial_lock();
         reset_exit_state();
         std::env::set_var("STOP_LOSS_PCT", "0.10");
         std::env::set_var("TAKE_PROFIT_PCT", "0.0");
@@ -362,7 +457,7 @@ mod tests {
 
     #[test]
     fn cooldown_blocks_reentry_then_releases() {
-        let _guard = lock();
+        let _guard = test_serial_lock();
         reset_exit_state();
         std::env::set_var("STOP_LOSS_PCT", "0.10");
         std::env::set_var("TAKE_PROFIT_PCT", "0.0");
@@ -385,8 +480,67 @@ mod tests {
     }
 
     #[test]
+    fn release_cooldown_frees_retry_without_touching_peak() {
+        let _guard = test_serial_lock();
+        reset_exit_state();
+        std::env::set_var("STOP_LOSS_PCT", "0.10");
+        std::env::set_var("TAKE_PROFIT_PCT", "0.0");
+        std::env::set_var("TRAILING_STOP", "false");
+        std::env::set_var("EXIT_COOLDOWN_TICKS", "5");
+        // Exit decision arms the cooldown...
+        match check_exit("BTC-USD", 80.0, pos(1.0, 100.0)) {
+            ExitCheck::Exit { .. } => {}
+            other => panic!("expected exit, got {other:?}"),
+        }
+        assert_eq!(cooldown_left("BTC-USD"), 5);
+        let peak = peak_for("BTC-USD");
+        // ...a rejected order releases it so the next pass retries.
+        release_cooldown("BTC-USD");
+        assert_eq!(cooldown_left("BTC-USD"), 0);
+        assert_eq!(peak_for("BTC-USD"), peak);
+        // Releasing an unknown symbol is a no-op, never a panic.
+        release_cooldown("NOPE-USD");
+        std::env::remove_var("STOP_LOSS_PCT");
+        std::env::remove_var("TAKE_PROFIT_PCT");
+        std::env::remove_var("TRAILING_STOP");
+        std::env::remove_var("EXIT_COOLDOWN_TICKS");
+    }
+
+    #[tokio::test]
+    async fn peaks_survive_a_restart_roundtrip() {
+        let Ok(url) = std::env::var("WARDEN_TEST_DATABASE_URL") else {
+            eprintln!("skipped: WARDEN_TEST_DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("proof DB");
+        let tenant = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, 'exits-proof')")
+            .bind(tenant)
+            .execute(&pool)
+            .await
+            .expect("insert tenant");
+        let _guard = test_serial_lock();
+        reset_exit_state();
+        std::env::set_var("STOP_LOSS_PCT", "0.02");
+        std::env::set_var("TAKE_PROFIT_PCT", "0.0");
+        std::env::set_var("TRAILING_STOP", "true");
+        // Rally to 150 without exiting: Hold advances the peak.
+        assert_eq!(check_exit("BTC-USD", 150.0, pos(1.0, 100.0)), ExitCheck::Hold);
+        assert_eq!(peak_for("BTC-USD"), 150.0);
+        persist_peak(&pool, tenant, "BTC-USD").await;
+        // Simulate a restart: memory wiped, DB row remains.
+        reset_exit_state();
+        assert_eq!(peak_for("BTC-USD"), 0.0);
+        seed_exit_peaks(&pool, tenant).await;
+        assert_eq!(peak_for("BTC-USD"), 150.0);
+        std::env::remove_var("STOP_LOSS_PCT");
+        std::env::remove_var("TAKE_PROFIT_PCT");
+        std::env::remove_var("TRAILING_STOP");
+    }
+
+    #[test]
     fn disabled_exits_never_fire() {
-        let _guard = lock();
+        let _guard = test_serial_lock();
         reset_exit_state();
         std::env::set_var("STOP_LOSS_PCT", "0.0");
         std::env::set_var("TAKE_PROFIT_PCT", "0.0");

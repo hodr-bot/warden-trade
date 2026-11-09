@@ -18,6 +18,9 @@ pub struct CreateOrderRequest {
     pub symbol: String,
     pub side: String,
     pub qty: f64,
+    /// Accepted for API compatibility but IGNORED (J2 "prix client"): the
+    /// fill executes at the server's live mark, never at a posted number.
+    #[allow(dead_code)]
     pub price: f64,
     #[serde(default = "default_exchange_name")]
     pub exchange: String,
@@ -102,8 +105,20 @@ pub async fn orders_handler(
 /// scheduler (signal-driven): same gate, same insert, same `201` shape
 /// on success. `idempotency_key` should always be set by callers; a
 /// duplicate key surfaces as a unique violation from Postgres.
+///
+/// `price` must be server-resolved (feed mark / last close) — never the
+/// caller-posted value (J2 "prix client"): fills execute at the market,
+/// not at a number typed into a form.
+///
+/// J2 atomicity: the risk gate and the insert run under the state's
+/// `order_gate` mutex, so a scheduler tick and a manual order racing
+/// each other cannot both pass the gate on the same ledger state
+/// check-then-insert was racy). J2 fail-closed: with an unreachable
+/// database buys are denied by the gate (`400 risk data unavailable`)
+/// and sells fail on the insert (generic `500` — nothing is recorded
+/// without a ledger). Insert failures never leak database internals.
 pub async fn place_paper_order(
-    pool: &sqlx::PgPool,
+    state: &AppState,
     tenant_id: uuid::Uuid,
     exchange: &str,
     symbol: &str,
@@ -112,17 +127,21 @@ pub async fn place_paper_order(
     price: f64,
     idempotency_key: Option<&str>,
 ) -> Result<PaperOrder, (StatusCode, String)> {
+    let _gate = state.order_gate.lock().await;
+    let pool = &state.pool;
     let intent = OrderIntent {
         symbol: symbol.to_string(),
         side: side.to_string(),
         qty,
         price,
     };
-    // Risk gate: per-tenant limits from Postgres (conservative fallback
-    // when unreadable). The engine never writes limits; agents have no path
-    // to change them.
+    // Risk gate: per-tenant limits from Postgres. The engine never writes
+    // limits; agents have no path to change them. Marks feed the
+    // unrealized leg of the daily-loss gate; an empty map only skips
+    // that leg (never hallucinates prices).
+    let marks = crate::live::current_marks();
     let limits = load_limits(pool, tenant_id).await;
-    check_order_full(pool, tenant_id, &limits, &intent)
+    check_order_full(pool, tenant_id, &limits, &intent, &marks)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
@@ -146,7 +165,8 @@ pub async fn place_paper_order(
                 return (StatusCode::CONFLICT, "duplicate idempotency_key".to_string());
             }
         }
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("insert failed: {e}"))
+        tracing::warn!("paper order insert failed: {e}");
+        (StatusCode::INTERNAL_SERVER_ERROR, "order could not be recorded".to_string())
     })?;
 
     use sqlx::Row;
@@ -170,6 +190,13 @@ pub async fn place_paper_order(
 /// Requires `Authorization: Bearer *** via [`Tenant`].
 /// Rejections from [`check_order`] become `400`; DB failures become `500`.
 /// Success returns `201` with the persisted order.
+///
+/// J2 ("prix client"): the posted `price` is IGNORED — the fill executes
+/// at the server's live mark for the symbol
+/// ([`crate::risk::resolve_execution_price`]). A caller-posted number is
+/// never a market; trusting it would let a stale or malicious quote set
+/// the ledger. When the feed has no fresh mark the order is refused
+/// (`503`, feed blind) instead of inventing a price.
 pub async fn create_order_handler(
     tenant: Tenant,
     State(state): State<AppState>,
@@ -183,14 +210,19 @@ pub async fn create_order_handler(
     if side != "buy" && side != "sell" {
         return Err((StatusCode::BAD_REQUEST, "side must be buy or sell".to_string()));
     }
+    let price = crate::risk::resolve_execution_price(&crate::live::current_marks(), &req.symbol)
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no live price for symbol: feed blind, try again".to_string(),
+        ))?;
     let order = place_paper_order(
-        &state.pool,
+        &state,
         tenant_id,
         &req.exchange,
         &req.symbol,
         &side,
         req.qty,
-        req.price,
+        price,
         req.idempotency_key.as_deref(),
     )
     .await?;
@@ -264,6 +296,7 @@ mod tests {
             pool: sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/none")
                 .expect("test lazy pool"),
             jwt_secret: "test".to_string(),
+            order_gate: Default::default(),
         }
     }
 

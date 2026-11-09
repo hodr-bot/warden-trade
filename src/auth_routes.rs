@@ -616,7 +616,7 @@ mod account_flow_tests {
     fn proof_state() -> Option<AppState> {
         let url = std::env::var("WARDEN_TEST_DATABASE_URL").ok()?;
         let pool = sqlx::PgPool::connect_lazy(&url).ok()?;
-        Some(AppState { pool, jwt_secret: "proof-secret-for-account-flow".to_string() })
+        Some(AppState { pool, jwt_secret: "proof-secret-for-account-flow".to_string(), order_gate: Default::default() })
     }
 
     #[tokio::test]

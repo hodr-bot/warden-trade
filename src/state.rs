@@ -13,6 +13,13 @@ pub struct AppState {
     pub pool: PgPool,
     /// HS256 secret used to sign/verify JWTs (see `crate::auth`).
     pub jwt_secret: String,
+    /// Serializes risk-gate + order-insert (J2: check-then-insert race).
+    ///
+    /// [`crate::orders::place_paper_order`] holds this across gate and
+    /// insert so concurrent ticks/API calls cannot both pass the gate on
+    /// the same ledger state. Process-local: the deployment runs a
+    /// single writer process. Cloned with the state (same mutex).
+    pub order_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Boot-time secret policy, pure for tests. Rejects the documented
@@ -58,7 +65,7 @@ impl AppState {
         let bind_addr = std::env::var("BIND_ADDR")
             .unwrap_or_else(|_| "127.0.0.1:3000".to_string());
         let pool = PgPool::connect_lazy(&database_url).expect("DATABASE_URL invalide");
-        (Self { pool, jwt_secret }, bind_addr)
+        (Self { pool, jwt_secret, order_gate: Default::default() }, bind_addr)
     }
 }
 
@@ -186,6 +193,7 @@ mod tests {
             pool: PgPool::connect_lazy("postgres://warden:warden@localhost:5432/warden_trade")
                 .expect("lazy pool must build"),
             jwt_secret: "test-secret-must-be-long-enough-0123456789".to_string(),
+            order_gate: Default::default(),
         }
     }
 
@@ -258,7 +266,7 @@ mod tests {
         .execute(&pool)
         .await
         .ok()?;
-        Some(AppState { pool, jwt_secret: secret })
+        Some(AppState { pool, jwt_secret: secret, order_gate: Default::default() })
     }
 
     #[tokio::test]

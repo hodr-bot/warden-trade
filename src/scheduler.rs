@@ -96,6 +96,70 @@ async fn long_held(pool: &sqlx::PgPool, tenant_id: uuid::Uuid, symbol: &str) -> 
     crate::dashboard::long_position(&fills)
 }
 
+/// One protective-exit evaluation for `symbol` at `price`.
+///
+/// Shared by the slow signal tick ([`tick_symbol`]) and the fast exit
+/// watch ([`spawn_exit_watch`]): protective exits sell through the same
+/// risk-gated order path as signals, so limits still apply; sales are
+/// never blocked. Returns `Some(summary)` when an exit was attempted or
+/// a cooldown tick was consumed, `None` on a quiet hold (caller then
+/// continues to the signal cycle).
+///
+/// J2 notes:
+/// - no `note_exit` here: [`crate::exits::check_exit`] already arms the
+///   cooldown when it decides to exit; re-arming after the order would
+///   hide a failed exit ("note_exit précoce");
+/// - on a rejected exit order the cooldown is released
+///   ([`crate::exits::release_cooldown`]) so the next evaluation
+///   retries instead of sleeping through a still-open losing position;
+/// - the (possibly advanced) trailing peak is persisted after every
+///   evaluation so a restart re-seeds from it.
+async fn run_exit(
+    state: &AppState,
+    tenant_id: uuid::Uuid,
+    symbol: &str,
+    price: f64,
+) -> Option<String> {
+    use crate::exits::{cap_sell_qty, check_exit, release_cooldown, ExitCheck};
+    let (held, avg) = long_held(&state.pool, tenant_id, symbol).await;
+    let position = if held > 0.0 {
+        Some(crate::exits::Position { qty: held, avg })
+    } else {
+        None
+    };
+    let summary = match check_exit(symbol, price, position) {
+        ExitCheck::Exit { qty, reason, .. } => {
+            let capped = cap_sell_qty(qty, held);
+            if capped <= 0.0 {
+                Some(format!("{symbol} exit skipped: nothing held ({reason})"))
+            } else {
+                let slot = chrono::Utc::now().timestamp() / scheduler_interval_secs() as i64;
+                let key = format!("exit-sell-{symbol}-{slot}");
+                match crate::orders::place_paper_order(
+                    state, tenant_id, "coinbase", symbol, "sell", capped, price, Some(&key),
+                )
+                .await
+                {
+                    Ok(order) => Some(format!(
+                        "{symbol} protective exit {reason}: sold {} @ {:.2} (id {})",
+                        order.qty, order.price, order.id
+                    )),
+                    Err((status, msg)) => {
+                        release_cooldown(symbol);
+                        Some(format!("{symbol} exit rejected ({status}): {msg}"))
+                    }
+                }
+            }
+        }
+        ExitCheck::Cooldown { ticks_left } => Some(format!(
+            "{symbol} cooldown: {ticks_left} ticks left, signal cycle skipped"
+        )),
+        ExitCheck::Hold => None,
+    };
+    crate::exits::persist_peak(&state.pool, tenant_id, symbol).await;
+    summary
+}
+
 /// One autonomous tick: cycle + optional single paper order.
 ///
 /// Returns a short human-readable summary for the logs. Never panics;
@@ -155,56 +219,9 @@ async fn tick_symbol(
         Some(p) if p.is_finite() && p > 0.0 => p,
         _ => return format!("{symbol} skipped: no price to trade"),
     };
-    // Protective exits pre-empt any fresh signal: stop-loss, take-profit
-    // (trailing when enabled) and post-exit cooldown live in
-    // [`crate::exits`]. Exits sell through the same risk-gated order path
-    // as signals, so limits still apply; sales are never blocked.
-    {
-        let (held, avg) = long_held(&state.pool, tenant_id, symbol).await;
-        let position = if held > 0.0 {
-            Some(crate::exits::Position { qty: held, avg })
-        } else {
-            None
-        };
-        match crate::exits::check_exit(symbol, price, position) {
-            crate::exits::ExitCheck::Exit { qty, reason, .. } => {
-                let capped = crate::exits::cap_sell_qty(qty, held);
-                if capped <= 0.0 {
-                    return format!("{symbol} exit skipped: nothing held ({reason})");
-                }
-                crate::exits::note_exit(symbol);
-                let slot = chrono::Utc::now().timestamp() / scheduler_interval_secs() as i64;
-                let key = format!("exit-sell-{symbol}-{slot}");
-                match crate::orders::place_paper_order(
-                    &state.pool,
-                    tenant_id,
-                    "coinbase",
-                    symbol,
-                    "sell",
-                    capped,
-                    price,
-                    Some(&key),
-                )
-                .await
-                {
-                    Ok(order) => {
-                        return format!(
-                            "{symbol} protective exit {reason}: sold {} @ {:.2} (id {})",
-                            order.qty, order.price, order.id
-                        )
-                    }
-                    Err((status, msg)) => {
-                        return format!("{symbol} exit rejected ({status}): {msg}")
-                    }
-                }
-            }
-            crate::exits::ExitCheck::Cooldown { ticks_left } => {
-                return format!(
-                    "{symbol} cooldown: {ticks_left} ticks left, signal cycle skipped"
-                )
-            }
-            crate::exits::ExitCheck::Hold => {}
-        }
+    // Protective exits pre-empt any fresh signal (see `run_exit`).
+    if let Some(summary) = run_exit(state, tenant_id, symbol, price).await {
+        return summary;
     }
     if side == "sell" {
         // No short selling on spot paper: cap the sell at what we hold.
@@ -216,7 +233,7 @@ async fn tick_symbol(
         let slot = chrono::Utc::now().timestamp() / scheduler_interval_secs() as i64;
         let key = format!("sched-{side}-{symbol}-{slot}");
         match crate::orders::place_paper_order(
-            &state.pool,
+            state,
             tenant_id,
             "coinbase",
             symbol,
@@ -252,7 +269,7 @@ async fn tick_symbol(
     let slot = chrono::Utc::now().timestamp() / scheduler_interval_secs() as i64;
     let key = format!("sched-{side}-{symbol}-{slot}");
     match crate::orders::place_paper_order(
-        &state.pool,
+        state,
         tenant_id,
         "coinbase",
         symbol,
@@ -282,6 +299,56 @@ pub fn spawn(state: AppState) {
     });
 }
 
+/// Seconds between protective-exit evaluations (`EXIT_CHECK_SECS`,
+/// default 30, clamped 5..=600).
+///
+/// J2 ("stops 60s"): exits used to run only on the slow signal tick
+/// (>= 30s, default 300s), so a stop triggered just after a tick waited
+/// a full cycle while the price kept falling. The watch reuses
+/// [`run_exit`] on the live feed marks, so an exit fires within seconds
+/// of the mark crossing the stop. Pure in env for tests.
+pub fn exit_check_secs() -> u64 {
+    std::env::var("EXIT_CHECK_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v: &u64| (5..=600).contains(v))
+        .unwrap_or(30)
+}
+
+/// Spawn the fast protective-exit watch (see [`exit_check_secs`]).
+///
+/// Runs alongside [`spawn`]; both share [`run_exit`], the in-memory
+/// cooldown and the persisted trailing peaks. Each pass prices symbols
+/// from the live Kraken marks ([`crate::live::current_marks`]); a
+/// symbol with no fresh mark is skipped, never priced from imagination.
+/// A pass with no tenant (DB down) degrades to a retry next pass —
+/// never to a trade. No-op without open positions (every symbol holds).
+pub fn spawn_exit_watch(state: AppState) {
+    tokio::spawn(async move {
+        tracing::info!("exit watch on: every {}s (paper only)", exit_check_secs());
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(exit_check_secs())).await;
+            let Some(tenant_id) = solo_tenant(&state.pool).await else {
+                continue;
+            };
+            let marks = crate::live::current_marks();
+            let mut notes = Vec::new();
+            for symbol in scheduler_symbols() {
+                let Some(price) = marks.get(&symbol).copied().filter(|p| p.is_finite() && *p > 0.0)
+                else {
+                    continue;
+                };
+                if let Some(note) = run_exit(&state, tenant_id, &symbol, price).await {
+                    notes.push(note);
+                }
+            }
+            if !notes.is_empty() {
+                tracing::info!("exit watch: {}", notes.join(" | "));
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +365,19 @@ mod tests {
     }
 
     #[test]
+    fn exit_watch_interval_defaults_and_clamps() {
+        std::env::remove_var("EXIT_CHECK_SECS");
+        assert_eq!(exit_check_secs(), 30);
+        std::env::set_var("EXIT_CHECK_SECS", "1");
+        assert_eq!(exit_check_secs(), 30, "below minimum clamps to default");
+        std::env::set_var("EXIT_CHECK_SECS", "900");
+        assert_eq!(exit_check_secs(), 30, "above maximum clamps to default");
+        std::env::set_var("EXIT_CHECK_SECS", "15");
+        assert_eq!(exit_check_secs(), 15);
+        std::env::remove_var("EXIT_CHECK_SECS");
+    }
+
+    #[test]
     fn enabled_defaults_true() {
         std::env::remove_var("SCHEDULER_ENABLED");
         assert!(scheduler_enabled());
@@ -308,10 +388,14 @@ mod tests {
 
     #[tokio::test]
     async fn tick_without_db_skips() {
+        // `tick` evaluates exits (global map + exit env vars): serialize
+        // against the exits tests via the shared lock (J2 flake).
+        let _guard = crate::exits::test_serial_lock();
         let state = AppState {
             pool: sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/none")
                 .expect("test lazy pool"),
             jwt_secret: "test".to_string(),
+            order_gate: Default::default(),
         };
         let summary = tick(&state).await;
         assert!(
