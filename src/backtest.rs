@@ -242,7 +242,7 @@ pub async fn backtest_handler(
             // J3 parity: the endpoint runs the live SMA rule itself,
             // not a parallel re-implementation.
             let result =
-                run_backtest_strategy(&crate::strategies::SmaCross, &closes);
+                run_backtest_strategy(&crate::strategies::SmaCross::default(), &closes);
             (candles.len(), from, to, result)
         }
         Err(e) => {
@@ -339,7 +339,7 @@ mod tests {
         ];
         for prices in &series {
             let legacy = run_backtest("sma-3-8", prices);
-            let shared = run_backtest_strategy(&SmaCross, prices);
+            let shared = run_backtest_strategy(&SmaCross::default(), prices);
             assert_eq!(legacy.trades, shared.trades, "trades on {prices:?}");
             assert_eq!(legacy.wins, shared.wins, "wins on {prices:?}");
             assert!(

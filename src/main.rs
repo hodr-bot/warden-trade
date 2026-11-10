@@ -18,6 +18,7 @@ mod exits;
 mod exchanges;
 mod fees;
 mod kraken;
+mod lab;
 mod live;
 mod livetrade;
 mod markets;
@@ -76,6 +77,8 @@ async fn main() {
         .route("/api/agents/run", post(orchestrator::run_cycle_handler))
         .route("/api/autonomy", get(autonomy::autonomy_handler))
         .route("/api/advisor", get(advisor::advisor_handler))
+        .route("/api/lab/evaluate", axum::routing::post(lab::evaluate_handler))
+        .route("/api/lab/journal", get(lab::journal_handler))
         .route("/api/live/status", get(kraken::live_status_handler))
         .route(
             "/api/wallet/watch",

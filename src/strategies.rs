@@ -47,23 +47,38 @@ fn sma_of(prices: &[f64], end: usize, window: usize) -> f64 {
 /// downward cross, `Hold` otherwise (including trending-without-cross
 /// and series shorter than 9 prices). Confidence is fixed at 0.7: a
 /// cross is a discrete event, not a calibrated probability.
+///
+/// Thin wrapper over [`SmaCross::default`]: the live loop keeps its
+/// exact behavior while the lab tries other windows through the struct.
 pub fn sma_signal(closes: &[f64]) -> StrategySignal {
-    const FAST: usize = 3;
-    const SLOW: usize = 8;
+    SmaCross::default().signal(closes)
+}
+
+/// SMA-crossover engine with explicit windows.
+///
+/// `fast` must be < `slow`; use [`crate::lab::StrategySpec`] validation
+/// (1 ≤ fast < slow ≤ 50) rather than enforcing here — the signal itself
+/// stays total on any input and degrades to `Hold` when a window never
+/// fills.
+fn sma_signal_windows(closes: &[f64], fast: usize, slow: usize) -> StrategySignal {
     let hold = |reason: &str| StrategySignal {
         strategy: "sma-3-8",
         signal: Signal::Hold,
         confidence: 0.0,
         reason: reason.to_string(),
     };
-    if closes.len() < SLOW + 1 {
+    // Total on any input: degenerate windows degrade to Hold, never panic.
+    if fast == 0 || fast >= slow {
+        return hold("degenerate windows (need 1 <= fast < slow)");
+    }
+    if closes.len() < slow + 1 {
         return hold("slow window never fills");
     }
     let last = closes.len() - 1;
-    let fast_now = sma_of(closes, last, FAST);
-    let slow_now = sma_of(closes, last, SLOW);
-    let fast_prev = sma_of(closes, last - 1, FAST);
-    let slow_prev = sma_of(closes, last - 1, SLOW);
+    let fast_now = sma_of(closes, last, fast);
+    let slow_now = sma_of(closes, last, slow);
+    let fast_prev = sma_of(closes, last - 1, fast);
+    let slow_prev = sma_of(closes, last - 1, slow);
     if fast_prev <= slow_prev && fast_now > slow_now {
         StrategySignal {
             strategy: "sma-3-8",
@@ -180,7 +195,22 @@ pub trait Strategy {
 }
 
 /// SMA(3)/SMA(8) crossover, live rule [`sma_signal`].
-pub struct SmaCross;
+///
+/// Explicit windows so the lab can try LLM-proposed variants through
+/// the same engine the live loop votes with. Prefer [`sma_signal`] for
+/// the fixed live rule; build this struct for lab windows.
+pub struct SmaCross {
+    /// Fast window in prices (live default 3).
+    pub fast: usize,
+    /// Slow window in prices (live default 8).
+    pub slow: usize,
+}
+
+impl Default for SmaCross {
+    fn default() -> Self {
+        Self { fast: 3, slow: 8 }
+    }
+}
 /// 20-price z-score fade, live rule [`mean_reversion_signal`].
 pub struct MeanReversion;
 /// 10-period rate-of-change breakout, live rule [`momentum_signal`].
@@ -191,7 +221,7 @@ impl Strategy for SmaCross {
         "sma-3-8"
     }
     fn signal(&self, closes: &[f64]) -> StrategySignal {
-        sma_signal(closes)
+        sma_signal_windows(closes, self.fast, self.slow)
     }
 }
 
