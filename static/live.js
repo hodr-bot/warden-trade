@@ -277,12 +277,12 @@
     if (!form || form.id !== "lab-form") return;
     ev.preventDefault();
     var btn = document.getElementById("lab-submit");
-    var product = document.getElementById("lab-product");
+    var picked = form.querySelector('input[name="lab-product"]:checked');
     var fast = document.getElementById("lab-fast");
     var slow = document.getElementById("lab-slow");
     var propose = document.getElementById("lab-propose");
-    if (!product || !fast || !slow) return;
-    var url = "/api/lab/evaluate?product=" + encodeURIComponent(product.value) +
+    if (!picked || !fast || !slow) return;
+    var url = "/api/lab/evaluate?product=" + encodeURIComponent(picked.value) +
       (propose && propose.checked ? "&propose=1" : "");
     if (btn) btn.disabled = true;
     labStatus("Evaluating on daily closes…");
@@ -308,6 +308,16 @@
     }).finally(function () {
       if (btn) btn.disabled = false;
     });
+  });
+
+  // Preset chips fill the window inputs (delegated: survives HTMX swaps).
+  document.addEventListener("click", function (ev) {
+    var chip = ev.target && ev.target.closest ? ev.target.closest(".chip[data-fast]") : null;
+    if (!chip) return;
+    var fast = document.getElementById("lab-fast");
+    var slow = document.getElementById("lab-slow");
+    if (fast) fast.value = chip.getAttribute("data-fast");
+    if (slow) slow.value = chip.getAttribute("data-slow");
   });
 
   document.addEventListener("htmx:afterSwap", function () {

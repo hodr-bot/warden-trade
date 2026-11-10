@@ -226,29 +226,35 @@
         </div>
       </div>
       <form id="lab-form" action="/api/lab/evaluate" method="post">
-        <div class="cards cards-flex">
-          <div class="field">
-            <label for="lab-product">Product</label>
-            <select class="input" id="lab-product" name="product">
-              <option value="BTC-USD" selected>BTC-USD</option>
-              <option value="ETH-USD">ETH-USD</option>
-              <option value="SOL-USD">SOL-USD</option>
-            </select>
+        <fieldset class="lab-row">
+          <legend>Product</legend>
+          <div class="seg" role="radiogroup" aria-label="Product">
+            <label class="seg-opt"><input type="radio" name="lab-product" value="BTC-USD" checked /><span>BTC-USD</span></label>
+            <label class="seg-opt"><input type="radio" name="lab-product" value="ETH-USD" /><span>ETH-USD</span></label>
+            <label class="seg-opt"><input type="radio" name="lab-product" value="SOL-USD" /><span>SOL-USD</span></label>
           </div>
-          <div class="field">
+        </fieldset>
+        <div class="lab-row">
+          <div class="field lab-num">
             <label for="lab-fast">Fast window</label>
             <input class="input" id="lab-fast" name="fast" type="number" min="1" max="49" value="2" required />
           </div>
-          <div class="field">
+          <div class="field lab-num">
             <label for="lab-slow">Slow window</label>
             <input class="input" id="lab-slow" name="slow" type="number" min="2" max="50" value="6" required />
           </div>
+          <div class="lab-presets">
+            <span class="muted">Presets</span>
+            <button type="button" class="chip" data-fast="3" data-slow="8">Live 3/8</button>
+            <button type="button" class="chip" data-fast="2" data-slow="6">Reactive 2/6</button>
+            <button type="button" class="chip" data-fast="5" data-slow="15">Smooth 5/15</button>
+          </div>
         </div>
-        <div class="field">
-          <label><input type="checkbox" id="lab-propose" name="propose" value="1" /> Also ask the model for candidates (uses LLM quota)</label>
+        <div class="lab-actions">
+          <label class="lab-check" for="lab-propose"><input type="checkbox" id="lab-propose" name="propose" value="1" />Also ask the model <span class="muted">(uses LLM quota)</span></label>
+          <button class="btn btn-primary" type="submit" id="lab-submit">Evaluate</button>
+          <span class="muted" id="lab-status" role="status" aria-live="polite"></span>
         </div>
-        <button class="btn btn-primary" type="submit" id="lab-submit">Evaluate</button>
-        <span class="muted" id="lab-status" role="status" aria-live="polite"></span>
       </form>
       <div class="table-wrap" id="lab-results-wrap" hidden>
         <table class="table" aria-label="Evaluation reports">
