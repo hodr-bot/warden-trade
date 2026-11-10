@@ -196,4 +196,126 @@
     var num = parseFloat(v);
     readout.textContent = when + " · " + (isNaN(num) ? v : (num >= 0 ? "+" : "") + num.toFixed(2) + " $");
   });
+
+  // Strategy lab (dashboard #lab section): delegated submit + re-render,
+  // so the 30s HTMX dashboard refresh never kills it. All cells are built
+  // with textContent — model-derived strings never touch innerHTML.
+  var labLast = null;
+
+  function labCell(row, text, cls) {
+    var td = document.createElement("td");
+    td.textContent = text;
+    if (cls) td.className = cls;
+    row.appendChild(td);
+    return td;
+  }
+
+  function labVerdict(r) {
+    return r.promoted ? "✓ promoted" : "✗ rejected";
+  }
+
+  function renderLabReports(list) {
+    var body = document.getElementById("lab-results");
+    var wrap = document.getElementById("lab-results-wrap");
+    if (!body || !wrap) return;
+    body.textContent = "";
+    list.forEach(function (r) {
+      var tr = document.createElement("tr");
+      labCell(tr, r.spec.strategy + " " + r.spec.fast + "/" + r.spec.slow);
+      labCell(tr, String(r.trades), "num");
+      labCell(tr, (r.win_rate * 100).toFixed(1) + " %", "num");
+      labCell(tr, (r.total_pnl >= 0 ? "+" : "") + r.total_pnl.toFixed(2) + " $", "num " + (r.total_pnl >= 0 ? "pos" : "neg"));
+      labCell(tr, r.max_drawdown.toFixed(2) + " $", "num");
+      labCell(tr, labVerdict(r), r.promoted ? "pos" : "neg");
+      body.appendChild(tr);
+    });
+    wrap.hidden = list.length === 0;
+  }
+
+  function renderLabJournal(rows) {
+    var body = document.getElementById("lab-journal");
+    if (!body) return;
+    body.textContent = "";
+    if (rows.length === 0) {
+      var tr = document.createElement("tr");
+      labCell(tr, "No evaluations yet — run one above.", "muted").colSpan = 6;
+      body.appendChild(tr);
+      return;
+    }
+    rows.forEach(function (j) {
+      var tr = document.createElement("tr");
+      var d = new Date(j.created_at);
+      labCell(tr, isNaN(d.getTime()) ? j.created_at : d.toISOString().slice(5, 16).replace("T", " ") + " UTC");
+      labCell(tr, j.spec.strategy + " " + j.spec.fast + "/" + j.spec.slow);
+      labCell(tr, String(j.trades), "num");
+      labCell(tr, (Number(j.total_pnl) >= 0 ? "+" : "") + Number(j.total_pnl).toFixed(2) + " $", "num " + (Number(j.total_pnl) >= 0 ? "pos" : "neg"));
+      labCell(tr, j.promoted ? "✓ promoted" : "✗ rejected", j.promoted ? "pos" : "neg");
+      labCell(tr, j.gate_reason, "muted");
+      body.appendChild(tr);
+    });
+  }
+
+  function labStatus(text) {
+    var el = document.getElementById("lab-status");
+    if (el) el.textContent = text;
+  }
+
+  function loadLabJournal() {
+    if (!document.getElementById("lab-journal")) return;
+    fetch("/api/lab/journal", { credentials: "same-origin" }).then(function (resp) {
+      if (!resp.ok) throw new Error("journal " + resp.status);
+      return resp.json();
+    }).then(function (rows) {
+      renderLabJournal(rows);
+    }).catch(function () {
+      labStatus("Journal unreachable — retry in a moment.");
+    });
+  }
+
+  document.addEventListener("submit", function (ev) {
+    var form = ev.target;
+    if (!form || form.id !== "lab-form") return;
+    ev.preventDefault();
+    var btn = document.getElementById("lab-submit");
+    var product = document.getElementById("lab-product");
+    var fast = document.getElementById("lab-fast");
+    var slow = document.getElementById("lab-slow");
+    var propose = document.getElementById("lab-propose");
+    if (!product || !fast || !slow) return;
+    var url = "/api/lab/evaluate?product=" + encodeURIComponent(product.value) +
+      (propose && propose.checked ? "&propose=1" : "");
+    if (btn) btn.disabled = true;
+    labStatus("Evaluating on daily closes…");
+    fetch(url, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify([{ strategy: "sma-cross", fast: Number(fast.value), slow: Number(slow.value) }]),
+    }).then(function (resp) {
+      if (resp.status === 401 || resp.status === 403) {
+        window.location.href = "/login";
+        throw new Error("auth");
+      }
+      if (!resp.ok) throw new Error("evaluate " + resp.status);
+      return resp.json();
+    }).then(function (reports) {
+      labLast = reports;
+      renderLabReports(reports);
+      loadLabJournal();
+      labStatus(reports.length + " spec(s) evaluated.");
+    }).catch(function (err) {
+      if (err && err.message !== "auth") labStatus("Evaluation failed — retry in a moment.");
+    }).finally(function () {
+      if (btn) btn.disabled = false;
+    });
+  });
+
+  document.addEventListener("htmx:afterSwap", function () {
+    if (document.getElementById("lab-journal")) {
+      loadLabJournal();
+      if (labLast) renderLabReports(labLast);
+    }
+  });
+
+  loadLabJournal();
 })();

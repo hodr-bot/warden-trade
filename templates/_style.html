@@ -807,6 +807,16 @@ table.table {
   vertical-align: middle;
 }
 
+/* Row headers (e.g. Account profile): UA stylesheets center `th`
+   by default — keep them left like every other cell. */
+.table tbody th {
+  padding: 13px var(--space-4);
+  border-bottom: 1px solid var(--border-soft);
+  text-align: left;
+  vertical-align: middle;
+  font-weight: 500;
+}
+
 .table th:first-child,
 .table td:first-child {
   padding-left: 0;
