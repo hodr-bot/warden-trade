@@ -53,7 +53,7 @@ async fn main() {
     // burn the auth budget that guards Argon2. Same 429 + Retry-After shape.
     let public_limiter = std::sync::Arc::new(ratelimit::RateLimiter::new(120, 60));
     let public_pages = Router::new()
-        .route("/u/:id", get(auth_routes::public_profile_handler))
+        .route("/u/{id}", get(auth_routes::public_profile_handler))
         .route_layer(axum::middleware::from_fn_with_state(
             public_limiter,
             ratelimit::limit_auth,
