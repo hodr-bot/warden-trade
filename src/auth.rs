@@ -12,6 +12,11 @@ pub struct Claims {
     /// decodable: they carry pv 0, which still matches any never-rotated row.
     #[serde(default)]
     pub pv: i32,
+    /// Token purpose: `"session"` for full logins, `"totp"` for
+    /// second-factor challenges. `default` keeps pre-TOTP tokens decodable:
+    /// they carry no purpose and still authenticate as sessions.
+    #[serde(default)]
+    pub purpose: String,
     pub exp: usize,
 }
 
@@ -52,6 +57,27 @@ pub fn encode_jwt(
         sub: user_id.to_owned(),
         tenant_id: tenant_id.to_owned(),
         pv: pwd_ver,
+        purpose: "session".to_string(),
+        exp,
+    };
+    let header = Header::new(Algorithm::HS256);
+    encode_jwt_claims(&claims, secret, header)
+}
+
+/// Encode a second-factor challenge: 5 minutes, purpose `"totp"`.
+/// Accepted only by the TOTP verify endpoint — never as a session.
+pub fn encode_challenge_jwt(
+    user_id: &str,
+    tenant_id: &str,
+    pwd_ver: i32,
+    secret: &[u8],
+) -> Result<String, jsonwebtoken::errors::Error> {
+    let exp = (chrono::Utc::now() + chrono::Duration::minutes(5)).timestamp() as usize;
+    let claims = Claims {
+        sub: user_id.to_owned(),
+        tenant_id: tenant_id.to_owned(),
+        pv: pwd_ver,
+        purpose: "totp".to_string(),
         exp,
     };
     let header = Header::new(Algorithm::HS256);

@@ -53,7 +53,7 @@ pub struct LoginResponse {
 pub async fn login_handler(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
-) -> Result<(axum::http::HeaderMap, Json<LoginResponse>), (StatusCode, String)> {
+) -> Result<(StatusCode, axum::http::HeaderMap, Json<serde_json::Value>), (StatusCode, String)> {
     let email = req.email.trim().to_ascii_lowercase();
     if email.is_empty() || req.password.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "email and password required".to_string()));
@@ -82,7 +82,7 @@ pub async fn login_handler(
 
     let admin_email_norm = admin_email().to_ascii_lowercase();
     let user_row = sqlx::query(
-        "SELECT id, password_hash, pwd_ver FROM users WHERE tenant_id = $1 AND email = $2",
+        "SELECT id, password_hash, pwd_ver, totp_enabled FROM users WHERE tenant_id = $1 AND email = $2",
     )
     .bind(tenant_id)
     .bind(&email)
@@ -90,7 +90,7 @@ pub async fn login_handler(
     .await
     .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
 
-    let (user_id, pwd_ver): (uuid::Uuid, i32) = match user_row {
+    let (user_id, pwd_ver, second_factor): (uuid::Uuid, i32, bool) = match user_row {
         Some(row) => {
             use sqlx::Row;
             let hash: String = row
@@ -105,7 +105,10 @@ pub async fn login_handler(
             let pv: i32 = row
                 .try_get("pwd_ver")
                 .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
-            (id, pv)
+            let tfa: bool = row
+                .try_get("totp_enabled")
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
+            (id, pv, tfa)
         }
         None => {
             // Auto-provision only the configured admin email AND the configured
@@ -131,9 +134,26 @@ pub async fn login_handler(
             let id: uuid::Uuid = row
                 .try_get("id")
                 .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
-            (id, 0)
+            (id, 0, false)
         }
     };
+
+    // Second factor on: the password alone buys only a 5-minute challenge,
+    // never a session. The TOTP endpoint swaps it for the real cookie.
+    if second_factor {
+        let challenge = crate::auth::encode_challenge_jwt(
+            &user_id.to_string(),
+            &tenant_id.to_string(),
+            pwd_ver,
+            state.jwt_secret.as_bytes(),
+        )
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "jwt", e))?;
+        return Ok((
+            StatusCode::ACCEPTED,
+            axum::http::HeaderMap::new(),
+            Json(serde_json::json!({ "totp_required": true, "challenge": challenge })),
+        ));
+    }
 
     let exp = (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as usize;
     let token = crate::auth::encode_jwt(
@@ -152,7 +172,7 @@ pub async fn login_handler(
     if let Ok(value) = cookie.parse() {
         headers.insert(axum::http::header::SET_COOKIE, value);
     }
-    Ok((headers, Json(LoginResponse { token })))
+    Ok((StatusCode::OK, headers, Json(serde_json::json!({ "token": token }))))
 }
 
 /// `POST /api/auth/logout`: expire the `warden_token` session cookie.
@@ -641,6 +661,296 @@ pub async fn confirm_reset_handler(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// Constant-time string compare: no early exit on the byte lane.
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (x, y) = (a.as_bytes(), b.as_bytes());
+    if x.len() != y.len() {
+        return false;
+    }
+    x.iter().zip(y.iter()).fold(0u8, |acc, (p, q)| acc | (p ^ q)) == 0
+}
+
+/// TOTP second factor: setup, confirm, verify (login step-up), disable.
+///
+/// Flow: authed `POST /totp/setup` returns the secret + `otpauth://` URL
+/// (scan it into any authenticator app — no QR image is generated
+/// server-side, the URL pastes straight into most apps). `POST
+/// /totp/confirm` with a live 6-digit code flips the factor on and returns
+/// 10 single-use backup codes, shown exactly once. From then on password
+/// login returns `202 totp_required` with a 5-minute challenge; `POST
+/// /totp/verify` swaps challenge + code for the real session cookie.
+///
+/// Storage note: the TOTP secret sits in `users.totp_secret` as
+/// base32. That column name reserves the follow-up — AEAD encryption at
+/// rest once a cipher crate is vendored (none is available offline today)
+/// — but the secret is NOT hashed: verification needs the raw bytes.
+/// Backup codes ARE hashed (SHA-256 hex), single-use, deleted on use.
+
+/// Rebuild the account's TOTP object from its stored base32 secret.
+fn account_totp(secret_b32: &str, email: &str) -> Result<totp_rs::TOTP, (StatusCode, String)> {
+    let bytes = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, secret_b32)
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "totp secret corrupt".to_string()))?;
+    totp_rs::TOTP::new(
+        totp_rs::Algorithm::SHA1,
+        6,
+        1,
+        30,
+        bytes,
+        Some("Warden Trade".to_string()),
+        email.to_string(),
+    )
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "totp misconfigured".to_string()))
+}
+
+/// One printable backup code: `XXXX-XXXX` from an unambiguous alphabet
+/// (no 0/O, no 1/I), ~48 bits of entropy, hashed before storage.
+fn new_backup_code() -> String {
+    use rand::seq::SliceRandom;
+    const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::thread_rng();
+    let pick = |rng: &mut rand::rngs::ThreadRng| *ALPHABET.choose(rng).expect("alphabet") as char;
+    let half: String = (0..4).map(|_| pick(&mut rng)).collect();
+    let half2: String = (0..4).map(|_| pick(&mut rng)).collect();
+    format!("{half}-{half2}")
+}
+
+/// `POST /api/auth/totp/setup` (authed): stage a fresh secret, return it
+/// with the `otpauth://` URL. Confirming with a live code enables it.
+/// Re-setup before confirming just replaces the pending secret.
+pub async fn setup_totp_handler(
+    State(state): State<AppState>,
+    tenant: crate::state::Tenant,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    use sqlx::Row;
+    let uid: uuid::Uuid = tenant
+        .user_id
+        .parse()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
+    let tid: uuid::Uuid = tenant
+        .tenant_id
+        .parse()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
+    let row = sqlx::query("SELECT email, totp_enabled FROM users WHERE id = $1 AND tenant_id = $2")
+        .bind(&uid)
+        .bind(&tid)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+    let Some(row) = row else {
+        return Err((StatusCode::UNAUTHORIZED, "unknown account".to_string()));
+    };
+    if row.try_get::<bool, _>("totp_enabled").unwrap_or(false) {
+        return Err((StatusCode::CONFLICT, "two-factor is already on — disable it first to rotate".to_string()));
+    }
+    let email: String = row.try_get("email").map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
+    let secret_bytes: [u8; 20] = rand::random();
+    let totp = totp_rs::TOTP::new(
+        totp_rs::Algorithm::SHA1,
+        6,
+        1,
+        30,
+        secret_bytes.to_vec(),
+        Some("Warden Trade".to_string()),
+        email.clone(),
+    )
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "totp misconfigured".to_string()))?;
+    let secret_b32 = totp.get_secret_base32();
+    sqlx::query("UPDATE users SET totp_secret = $1, totp_enabled = false WHERE id = $2")
+        .bind(&secret_b32)
+        .bind(&uid)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+    Ok(Json(serde_json::json!({ "secret": secret_b32, "otpauth_url": totp.get_url() })))
+}
+
+/// `POST /api/auth/totp/confirm` (authed): a live 6-digit code flips the
+/// factor on and mints 10 single-use backup codes, returned once.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TotpConfirm {
+    pub code: String,
+}
+
+pub async fn confirm_totp_handler(
+    State(state): State<AppState>,
+    tenant: crate::state::Tenant,
+    Json(req): Json<TotpConfirm>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    use sqlx::Row;
+    let uid: uuid::Uuid = tenant
+        .user_id
+        .parse()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
+    let tid: uuid::Uuid = tenant
+        .tenant_id
+        .parse()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
+    let row = sqlx::query("SELECT email, totp_secret, totp_enabled FROM users WHERE id = $1 AND tenant_id = $2")
+        .bind(&uid)
+        .bind(&tid)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+    let Some(row) = row else {
+        return Err((StatusCode::UNAUTHORIZED, "unknown account".to_string()));
+    };
+    if row.try_get::<bool, _>("totp_enabled").unwrap_or(false) {
+        return Err((StatusCode::CONFLICT, "two-factor is already on".to_string()));
+    }
+    let email: String = row.try_get("email").map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
+    let secret: Option<String> = row.try_get("totp_secret").map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
+    let Some(secret) = secret else {
+        return Err((StatusCode::BAD_REQUEST, "run setup first".to_string()));
+    };
+    let totp = account_totp(&secret, &email)?;
+    let live = totp.check_current(&req.code.trim()).unwrap_or(false);
+    if !live {
+        return Err((StatusCode::UNAUTHORIZED, "wrong code".to_string()));
+    }
+    sqlx::query("UPDATE users SET totp_enabled = true WHERE id = $1")
+        .bind(&uid)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+    let codes: Vec<String> = (0..10).map(|_| new_backup_code()).collect();
+    sqlx::query("DELETE FROM totp_backup_codes WHERE user_id = $1")
+        .bind(&uid)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+    for code in &codes {
+        sqlx::query("INSERT INTO totp_backup_codes (user_id, code_hash) VALUES ($1, $2)")
+            .bind(&uid)
+            .bind(token_hash(code))
+            .execute(&state.pool)
+            .await
+            .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+    }
+    Ok(Json(serde_json::json!({ "ok": true, "backup_codes": codes })))
+}
+
+/// `POST /api/auth/totp/verify` (challenge, rate-limited): swap a live
+/// 5-minute challenge + TOTP code (or unused backup code) for the real
+/// session. Challenge tokens never authenticate anywhere else.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TotpVerify {
+    pub challenge: String,
+    pub code: String,
+}
+
+pub async fn verify_totp_handler(
+    State(state): State<AppState>,
+    Json(req): Json<TotpVerify>,
+) -> Result<(axum::http::HeaderMap, Json<serde_json::Value>), (StatusCode, String)> {
+    let claims = crate::auth::decode_jwt(&req.challenge, state.jwt_secret.as_bytes())
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "challenge expired".to_string()))?;
+    if claims.purpose != "totp" {
+        return Err((StatusCode::UNAUTHORIZED, "not a challenge".to_string()));
+    }
+    use sqlx::Row;
+    let user_id: uuid::Uuid = claims.sub.parse().map_err(|_| (StatusCode::UNAUTHORIZED, "challenge expired".to_string()))?;
+    let tenant_id: uuid::Uuid = claims.tenant_id.parse().map_err(|_| (StatusCode::UNAUTHORIZED, "challenge expired".to_string()))?;
+    let row = sqlx::query("SELECT email, password_hash, pwd_ver, totp_secret, totp_enabled FROM users WHERE id = $1 AND tenant_id = $2")
+        .bind(user_id)
+        .bind(tenant_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+    let Some(row) = row else {
+        return Err((StatusCode::UNAUTHORIZED, "challenge expired".to_string()));
+    };
+    let live_pv: i32 = row.try_get("pwd_ver").map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
+    if live_pv != claims.pv {
+        return Err((StatusCode::UNAUTHORIZED, "challenge expired".to_string()));
+    }
+    if !row.try_get::<bool, _>("totp_enabled").unwrap_or(false) {
+        return Err((StatusCode::UNAUTHORIZED, "challenge expired".to_string()));
+    }
+    let email: String = row.try_get("email").map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
+    let code = req.code.trim().replace(' ', "");
+    let mut accepted = false;
+    if let Ok(secret) = row.try_get::<Option<String>, _>("totp_secret") {
+        if let Some(secret) = secret {
+            if let Ok(totp) = account_totp(&secret, &email) {
+                accepted = totp.check_current(&code).unwrap_or(false);
+            }
+        }
+    }
+    if !accepted {
+        // Fall back to a backup code: hash-compare, single-use.
+        let rows = sqlx::query("SELECT code_hash FROM totp_backup_codes WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_all(&state.pool)
+            .await
+            .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+        for cand in rows {
+            let stored: String = cand.try_get("code_hash").unwrap_or_default();
+            if ct_eq(&stored, &token_hash(&code)) {
+                sqlx::query("DELETE FROM totp_backup_codes WHERE user_id = $1 AND code_hash = $2")
+                    .bind(user_id)
+                    .bind(&stored)
+                    .execute(&state.pool)
+                    .await
+                    .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+                accepted = true;
+                break;
+            }
+        }
+    }
+    if !accepted {
+        return Err((StatusCode::UNAUTHORIZED, "wrong code".to_string()));
+    }
+    let (headers, token) = issue_session(&state, &user_id, &tenant_id, live_pv)?;
+    Ok((headers, Json(serde_json::json!({ "token": token }))))
+}
+
+/// `POST /api/auth/totp/disable` (authed + password): tear the factor
+/// down, wipe the secret and every backup code.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TotpDisable {
+    pub password: String,
+}
+
+pub async fn disable_totp_handler(
+    State(state): State<AppState>,
+    tenant: crate::state::Tenant,
+    Json(req): Json<TotpDisable>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    use sqlx::Row;
+    let uid: uuid::Uuid = tenant
+        .user_id
+        .parse()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
+    let tid: uuid::Uuid = tenant
+        .tenant_id
+        .parse()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
+    let row = sqlx::query("SELECT password_hash FROM users WHERE id = $1 AND tenant_id = $2")
+        .bind(&uid)
+        .bind(&tid)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+    let Some(row) = row else {
+        return Err((StatusCode::UNAUTHORIZED, "unknown account".to_string()));
+    };
+    let hash: String = row.try_get("password_hash").map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
+    if !crate::auth::verify_password(&hash, &req.password) {
+        return Err((StatusCode::UNAUTHORIZED, "wrong password".to_string()));
+    }
+    sqlx::query("UPDATE users SET totp_secret = NULL, totp_enabled = false WHERE id = $1")
+        .bind(&uid)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+    sqlx::query("DELETE FROM totp_backup_codes WHERE user_id = $1")
+        .bind(&uid)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 /// Account data shown on the settings page. Never a hash, never a token.
 #[derive(askama::Template)]
 #[template(path = "account.html")]
@@ -649,6 +959,7 @@ pub struct AccountTemplate {
     pub role: String,
     pub member_since: String,
     pub email_verified: bool,
+    pub totp_enabled: bool,
 }
 
 /// `GET /account`: settings page for the signed-in user.
@@ -665,7 +976,7 @@ pub async fn account_page_handler(
         .parse()
         .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
     let row = sqlx::query(
-        "SELECT email, role, created_at, email_verified_at FROM users WHERE id = $1 AND tenant_id = $2",
+        "SELECT email, role, created_at, email_verified_at, totp_enabled FROM users WHERE id = $1 AND tenant_id = $2",
     )
     .bind(user_id)
     .bind(tenant_id)
@@ -693,6 +1004,7 @@ pub async fn account_page_handler(
         role,
         member_since: created.format("%Y-%m-%d").to_string(),
         email_verified: verified.is_some(),
+        totp_enabled: row.try_get::<bool, _>("totp_enabled").unwrap_or(false),
     };
     Ok(axum::response::Html(
         page.render()
@@ -916,6 +1228,7 @@ mod page_tests {
             role: "member".to_string(),
             member_since: "2026-11-09".to_string(),
             email_verified: false,
+            totp_enabled: false,
         };
         let html = page.render().expect("account renders");
         assert!(html.contains("trader@example.com"), "account must show the email");
@@ -932,10 +1245,13 @@ mod page_tests {
             role: "member".to_string(),
             member_since: "2026-11-09".to_string(),
             email_verified: true,
+            totp_enabled: true,
         };
         let verified_html = verified_page.render().expect("verified account renders");
         assert!(verified_html.contains("Verified"), "account must flag verified addresses");
         assert!(!verified_html.contains("id=\"verify-resend\""), "verified account must not offer a resend");
+        assert!(verified_html.contains("Two-factor"), "account must expose the 2FA section");
+        assert!(verified_html.contains("totp-disable"), "2FA-on account must offer disable");
     }
 }
 
@@ -1037,14 +1353,16 @@ mod account_flow_tests {
         assert!(matches!(weak, Err((StatusCode::BAD_REQUEST, _))), "weak must 400, got {weak:?}");
 
         // Login works with the fresh credentials.
-        let (_, Json(login)) = login_handler(
+        let (status, _, Json(login)) = login_handler(
             State(state.clone()),
             Json(LoginRequest { email: email.clone(), password: "correct-horse-10".to_string() }),
         )
         .await
         .expect("login with fresh credentials must succeed");
-        assert!(!login.token.is_empty());
-        let claims = crate::auth::decode_jwt(&login.token, state.jwt_secret.as_bytes())
+        assert_eq!(status, StatusCode::OK);
+        let token = login.get("token").and_then(|v| v.as_str()).unwrap_or_default();
+        assert!(!token.is_empty());
+        let claims = crate::auth::decode_jwt(token, state.jwt_secret.as_bytes())
             .expect("token must decode");
         let tenant = crate::state::Tenant { tenant_id: claims.tenant_id, user_id: claims.sub };
 
@@ -1093,12 +1411,150 @@ mod account_flow_tests {
         use axum::extract::FromRequestParts;
         let req = axum::http::Request::builder()
             .uri("/")
-            .header("Cookie", format!("warden_token={}", login.token))
+            .header("Cookie", format!("warden_token={token}"))
             .body(Body::empty())
             .unwrap();
         let (mut parts, _) = req.into_parts();
         let rejected = crate::state::Tenant::from_request_parts(&mut parts, &state).await;
         assert!(rejected.is_err(), "stale token must not authenticate after rotation");
+        super::page_tests::restore_signup_env(prev);
+    }
+
+    /// TOTP helper: rebuild a live code from a setup response's secret.
+    fn live_totp_code(secret_b32: &str, email: &str) -> String {
+        let bytes = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, secret_b32)
+            .expect("setup secret must be valid base32");
+        totp_rs::TOTP::new(totp_rs::Algorithm::SHA1, 6, 1, 30, bytes, Some("Warden Trade".to_string()), email.to_string())
+            .expect("totp must build")
+            .generate_current()
+            .expect("code must generate")
+    }
+
+    fn mutate_code(code: &str) -> String {
+        let mut chars: Vec<char> = code.chars().collect();
+        chars[0] = if chars[0] == '0' { '1' } else { '0' };
+        chars.into_iter().collect()
+    }
+
+    #[tokio::test]
+    async fn totp_step_up_roundtrip() {
+        let _lock = super::page_tests::signup_test_lock();
+        let prev = std::env::var("SIGNUP_ENABLED").ok();
+        std::env::set_var("SIGNUP_ENABLED", "1");
+        let Some(state) = proof_state() else {
+            super::page_tests::restore_signup_env(prev);
+            return;
+        };
+        let email = format!("tfa{}@example.com", chrono::Utc::now().timestamp_millis());
+        let password = "correct-horse-10".to_string();
+
+        signup_handler(State(state.clone()), Json(SignupRequest { email: email.clone(), password: password.clone() }))
+            .await.expect("signup must succeed");
+
+        // Baseline: no second factor, plain 200 login.
+        let (status, _, Json(body)) = login_handler(
+            State(state.clone()),
+            Json(LoginRequest { email: email.clone(), password: password.clone() }),
+        ).await.expect("login must succeed");
+        assert_eq!(status, StatusCode::OK);
+        let first_token = body.get("token").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        assert!(!first_token.is_empty());
+        let claims = crate::auth::decode_jwt(&first_token, state.jwt_secret.as_bytes()).expect("token must decode");
+        assert_eq!(claims.purpose, "session", "session tokens carry their purpose");
+        let tenant = crate::state::Tenant { tenant_id: claims.tenant_id.clone(), user_id: claims.sub.clone() };
+
+        // Setup: secret + otpauth URL, factor still off.
+        let Json(setup) = setup_totp_handler(State(state.clone()), tenant.clone()).await.expect("setup must succeed");
+        let secret = setup.get("secret").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let url = setup.get("otpauth_url").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        assert!(!secret.is_empty() && url.starts_with("otpauth://totp/"), "got {setup:?}");
+        let (status, _, _) = login_handler(
+            State(state.clone()),
+            Json(LoginRequest { email: email.clone(), password: password.clone() }),
+        ).await.expect("login must still succeed");
+        assert_eq!(status, StatusCode::OK, "unconfirmed setup must not lock the account");
+
+        // Wrong code cannot confirm; a mutated live code is certainly wrong.
+        let good = live_totp_code(&secret, &email);
+        let bad = confirm_totp_handler(State(state.clone()), tenant.clone(), Json(TotpConfirm { code: mutate_code(&good) })).await;
+        assert!(matches!(bad, Err((StatusCode::UNAUTHORIZED, _))), "wrong code must 401, got {bad:?}");
+
+        // Confirm with the live code: ten one-shot backup codes come back.
+        let Json(confirmed) = confirm_totp_handler(State(state.clone()), tenant.clone(), Json(TotpConfirm { code: good })).await
+            .expect("live code must confirm");
+        let codes: Vec<String> = serde_json::from_value(confirmed.get("backup_codes").cloned().unwrap_or_default()).unwrap_or_default();
+        assert_eq!(codes.len(), 10, "ten backup codes, got {confirmed:?}");
+
+        // Password login now yields a challenge, not a session.
+        let (status, _, Json(step)) = login_handler(
+            State(state.clone()),
+            Json(LoginRequest { email: email.clone(), password: password.clone() }),
+        ).await.expect("password stage must succeed");
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(step.get("totp_required").and_then(|v| v.as_bool()), Some(true));
+        let challenge = step.get("challenge").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        assert!(!challenge.is_empty());
+
+        // The challenge is not a session: the extractor rejects it.
+        use axum::body::Body;
+        use axum::extract::FromRequestParts;
+        let req = axum::http::Request::builder()
+            .uri("/")
+            .header("Cookie", format!("warden_token={challenge}"))
+            .body(Body::empty()).unwrap();
+        let (mut parts, _) = req.into_parts();
+        let refused = crate::state::Tenant::from_request_parts(&mut parts, &state).await;
+        assert!(refused.is_err(), "challenge must never authenticate as a session");
+
+        // Wrong second step stays shut.
+        let wrong = verify_totp_handler(
+            State(state.clone()),
+            Json(TotpVerify { challenge: challenge.clone(), code: "000000".to_string() }),
+        ).await;
+        assert!(matches!(wrong, Err((StatusCode::UNAUTHORIZED, _))), "wrong TOTP must 401, got {wrong:?}");
+
+        // Right code swaps the challenge for a real session.
+        let fresh = live_totp_code(&secret, &email);
+        let (_, Json(done)) = verify_totp_handler(
+            State(state.clone()),
+            Json(TotpVerify { challenge, code: fresh }),
+        ).await.expect("live TOTP must verify");
+        let session = done.get("token").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        assert!(!session.is_empty());
+        let req = axum::http::Request::builder()
+            .uri("/")
+            .header("Cookie", format!("warden_token={session}"))
+            .body(Body::empty()).unwrap();
+        let (mut parts, _) = req.into_parts();
+        assert!(crate::state::Tenant::from_request_parts(&mut parts, &state).await.is_ok(), "TOTP session must authenticate");
+
+        // One backup code works exactly once.
+        let retry = verify_totp_handler(
+            State(state.clone()),
+            Json(TotpVerify { challenge: {
+                let (s, _, Json(b)) = login_handler(State(state.clone()), Json(LoginRequest { email: email.clone(), password: password.clone() })).await.expect("password stage");
+                assert_eq!(s, StatusCode::ACCEPTED);
+                b.get("challenge").and_then(|v| v.as_str()).unwrap_or_default().to_string()
+            }, code: codes[0].clone() }),
+        ).await;
+        assert!(retry.is_ok(), "first backup-code use must succeed, got {retry:?}");
+        let replay = verify_totp_handler(
+            State(state.clone()),
+            Json(TotpVerify { challenge: {
+                let (s, _, Json(b)) = login_handler(State(state.clone()), Json(LoginRequest { email: email.clone(), password: password.clone() })).await.expect("password stage");
+                assert_eq!(s, StatusCode::ACCEPTED);
+                b.get("challenge").and_then(|v| v.as_str()).unwrap_or_default().to_string()
+            }, code: codes[0].clone() }),
+        ).await;
+        assert!(matches!(replay, Err((StatusCode::UNAUTHORIZED, _))), "backup code must be single-use, got {replay:?}");
+
+        // Wrong password cannot disable; right password tears the factor down.
+        let bad_off = disable_totp_handler(State(state.clone()), tenant.clone(), Json(TotpDisable { password: "not-the-password-1".to_string() })).await;
+        assert!(matches!(bad_off, Err((StatusCode::UNAUTHORIZED, _))), "disable needs the password, got {bad_off:?}");
+        disable_totp_handler(State(state.clone()), tenant, Json(TotpDisable { password })).await.expect("disable must succeed");
+        let (status, _, _) = login_handler(State(state.clone()), Json(LoginRequest { email, password: "correct-horse-10".to_string() })).await
+            .expect("login must succeed");
+        assert_eq!(status, StatusCode::OK, "account is single-factor again");
         super::page_tests::restore_signup_env(prev);
     }
 

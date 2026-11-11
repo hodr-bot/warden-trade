@@ -59,6 +59,10 @@ async fn main() {
         .route("/verify/resend", post(auth_routes::resend_verification_handler))
         .route("/reset/request", post(auth_routes::request_reset_handler))
         .route("/reset/confirm", post(auth_routes::confirm_reset_handler))
+        .route("/totp/setup", post(auth_routes::setup_totp_handler))
+        .route("/totp/confirm", post(auth_routes::confirm_totp_handler))
+        .route("/totp/verify", post(auth_routes::verify_totp_handler))
+        .route("/totp/disable", post(auth_routes::disable_totp_handler))
         .route("/account", axum::routing::delete(auth_routes::delete_account_handler))
         .route_layer(axum::middleware::from_fn_with_state(
             limiter,
