@@ -63,6 +63,7 @@ async fn main() {
         .route("/totp/confirm", post(auth_routes::confirm_totp_handler))
         .route("/totp/verify", post(auth_routes::verify_totp_handler))
         .route("/totp/disable", post(auth_routes::disable_totp_handler))
+        .route("/profile", post(auth_routes::update_profile_handler))
         .route("/account", axum::routing::delete(auth_routes::delete_account_handler))
         .route_layer(axum::middleware::from_fn_with_state(
             limiter,

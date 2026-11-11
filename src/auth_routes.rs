@@ -951,11 +951,118 @@ pub async fn disable_totp_handler(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// Incoming profile edit: both fields optional, at least one required.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProfileUpdate {
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+}
+
+/// `POST /api/auth/profile` (authed): display name + address.
+///
+/// Display name is free text ≤ 40 chars (empty clears it). A changed
+/// address runs the same shape check as signup, must be free inside the
+/// tenant (`409` when taken), and restarts verification: `email_verified_at`
+/// clears and a fresh link goes out. Same-address edits touch nothing.
+pub async fn update_profile_handler(
+    State(state): State<AppState>,
+    tenant: crate::state::Tenant,
+    Json(req): Json<ProfileUpdate>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let uid: uuid::Uuid = tenant
+        .user_id
+        .parse()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
+    let tid: uuid::Uuid = tenant
+        .tenant_id
+        .parse()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
+    let want_name = req.display_name.is_some();
+    let want_email = req.email.as_ref().is_some_and(|e| !e.trim().is_empty());
+    if !want_name && !want_email {
+        return Err((StatusCode::BAD_REQUEST, "nothing to update".to_string()));
+    }
+    if let Some(name) = req.display_name.as_ref() {
+        if name.chars().count() > 40 {
+            return Err((StatusCode::BAD_REQUEST, "display name must be 40 characters or fewer".to_string()));
+        }
+    }
+    if let Some(name) = req.display_name {
+        let clean = name.trim().to_string();
+        let stored: Option<String> = if clean.is_empty() { None } else { Some(clean) };
+        sqlx::query("UPDATE users SET display_name = $1 WHERE id = $2 AND tenant_id = $3")
+            .bind(&stored)
+            .bind(&uid)
+            .bind(&tid)
+            .execute(&state.pool)
+            .await
+            .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+    }
+    let mut email_changed = false;
+    if let Some(raw) = req.email {
+        let email = raw.trim().to_ascii_lowercase();
+        if email.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "email required".to_string()));
+        }
+        if !valid_email(&email) {
+            return Err((StatusCode::BAD_REQUEST, "invalid email".to_string()));
+        }
+        use sqlx::Row;
+        let row = sqlx::query("SELECT email FROM users WHERE id = $1 AND tenant_id = $2")
+            .bind(&uid)
+            .bind(&tid)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+        let Some(row) = row else {
+            return Err((StatusCode::UNAUTHORIZED, "unknown account".to_string()));
+        };
+        let current: String = row.try_get("email").unwrap_or_default();
+        if current.to_ascii_lowercase() != email {
+            let clash: Option<uuid::Uuid> = sqlx::query_scalar(
+                "SELECT id FROM users WHERE tenant_id = $1 AND email = $2",
+            )
+            .bind(&tid)
+            .bind(&email)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+            if clash.is_some_and(|id| id != uid) {
+                return Err((StatusCode::CONFLICT, "address taken".to_string()));
+            }
+            sqlx::query("UPDATE users SET email = $1, email_verified_at = NULL WHERE id = $2")
+                .bind(&email)
+                .bind(&uid)
+                .execute(&state.pool)
+                .await
+                .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+            match issue_verification_token(&state.pool, uid, 72).await {
+                Ok(raw) => {
+                    let link = format!("{}/verify?token={raw}", public_base_url());
+                    let body = format!(
+                        "Your Warden Trade address changed.\n\nConfirm the new address to keep your account secure:\n{link}\n\nThis link expires in 72 hours. If you did not request this, change your password."
+                    );
+                    if let Err(e) = crate::mail::Mailer::from_env()
+                        .send(&email, "Warden Trade: verify your new address", &body)
+                        .await
+                    {
+                        tracing::warn!("re-verification email failed for {email}: {e}");
+                    }
+                }
+                Err(e) => tracing::warn!("re-verification token failed for {email}: {e}"),
+            }
+            email_changed = true;
+        }
+    }
+    Ok(Json(serde_json::json!({ "ok": true, "email_changed": email_changed })))
+}
+
 /// Account data shown on the settings page. Never a hash, never a token.
 #[derive(askama::Template)]
 #[template(path = "account.html")]
 pub struct AccountTemplate {
     pub email: String,
+    pub display_name: Option<String>,
     pub role: String,
     pub member_since: String,
     pub email_verified: bool,
@@ -976,7 +1083,7 @@ pub async fn account_page_handler(
         .parse()
         .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
     let row = sqlx::query(
-        "SELECT email, role, created_at, email_verified_at, totp_enabled FROM users WHERE id = $1 AND tenant_id = $2",
+        "SELECT email, display_name, role, created_at, email_verified_at, totp_enabled FROM users WHERE id = $1 AND tenant_id = $2",
     )
     .bind(user_id)
     .bind(tenant_id)
@@ -1001,6 +1108,7 @@ pub async fn account_page_handler(
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
     let page = AccountTemplate {
         email,
+        display_name: row.try_get("display_name").unwrap_or(None),
         role,
         member_since: created.format("%Y-%m-%d").to_string(),
         email_verified: verified.is_some(),
@@ -1225,6 +1333,7 @@ mod page_tests {
     async fn account_template_renders_profile_without_secrets() {
         let page = AccountTemplate {
             email: "trader@example.com".to_string(),
+            display_name: Some("Ace".to_string()),
             role: "member".to_string(),
             member_since: "2026-11-09".to_string(),
             email_verified: false,
@@ -1232,6 +1341,7 @@ mod page_tests {
         };
         let html = page.render().expect("account renders");
         assert!(html.contains("trader@example.com"), "account must show the email");
+        assert!(html.contains("Ace"), "account must show the display name");
         assert!(html.contains("member"), "account must show the role");
         assert!(html.contains("2026-11-09"), "account must show member-since");
         assert!(html.contains("Unverified"), "account must flag unverified addresses");
@@ -1242,6 +1352,7 @@ mod page_tests {
         assert!(!html.contains("localStorage"), "no client-side secret storage");
         let verified_page = AccountTemplate {
             email: "trader@example.com".to_string(),
+            display_name: None,
             role: "member".to_string(),
             member_since: "2026-11-09".to_string(),
             email_verified: true,
@@ -1816,6 +1927,107 @@ mod account_flow_tests {
         )
         .await;
         assert!(matches!(again, Err((StatusCode::UNAUTHORIZED, _))), "reset token must be single-use, got {again:?}");
+        super::page_tests::restore_signup_env(prev);
+    }
+
+    #[tokio::test]
+    async fn profile_update_roundtrip() {
+        let _lock = super::page_tests::signup_test_lock();
+        let prev = std::env::var("SIGNUP_ENABLED").ok();
+        std::env::set_var("SIGNUP_ENABLED", "1");
+        let Some(state) = proof_state() else {
+            super::page_tests::restore_signup_env(prev);
+            return;
+        };
+        let stamp = chrono::Utc::now().timestamp_millis();
+        let email = format!("prof{stamp}@example.com");
+        let password = "correct-horse-10".to_string();
+        signup_handler(State(state.clone()), Json(SignupRequest { email: email.clone(), password: password.clone() }))
+            .await.expect("signup must succeed");
+        let (_, _, Json(body)) = login_handler(
+            State(state.clone()),
+            Json(LoginRequest { email: email.clone(), password: password.clone() }),
+        ).await.expect("login must succeed");
+        let token = body.get("token").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let claims = crate::auth::decode_jwt(&token, state.jwt_secret.as_bytes()).expect("token must decode");
+        let tenant = crate::state::Tenant { tenant_id: claims.tenant_id.clone(), user_id: claims.sub.clone() };
+        let uid: uuid::Uuid = claims.sub.parse().expect("sub is a uuid");
+
+        // Display name + same address: stored, verification untouched.
+        let Json(ok) = update_profile_handler(
+            State(state.clone()), tenant.clone(),
+            Json(ProfileUpdate { display_name: Some("Ace Trader".to_string()), email: Some(email.clone()) }),
+        ).await.expect("profile update must succeed");
+        assert_eq!(ok, serde_json::json!({ "ok": true, "email_changed": false }));
+        use sqlx::Row;
+        let row = sqlx::query("SELECT display_name, email_verified_at FROM users WHERE id = $1")
+            .bind(uid).fetch_one(&state.pool).await.expect("row must exist");
+        let name: Option<String> = row.try_get("display_name").unwrap_or(None);
+        assert_eq!(name.as_deref(), Some("Ace Trader"));
+        let verified: Option<chrono::DateTime<chrono::Utc>> = row.try_get("email_verified_at").unwrap_or(None);
+        assert!(verified.is_none(), "signup leaves verification pending in tests");
+
+        // Nothing to update, bad address, over-long name: all 400.
+        let empty = update_profile_handler(
+            State(state.clone()), tenant.clone(),
+            Json(ProfileUpdate { display_name: None, email: None }),
+        ).await;
+        assert!(matches!(empty, Err((StatusCode::BAD_REQUEST, _))), "empty update must 400, got {empty:?}");
+        let bad = update_profile_handler(
+            State(state.clone()), tenant.clone(),
+            Json(ProfileUpdate { display_name: None, email: Some("not-an-email".to_string()) }),
+        ).await;
+        assert!(matches!(bad, Err((StatusCode::BAD_REQUEST, _))), "bad email must 400, got {bad:?}");
+        let long = update_profile_handler(
+            State(state.clone()), tenant.clone(),
+            Json(ProfileUpdate { display_name: Some("x".repeat(41)), email: None }),
+        ).await;
+        assert!(matches!(long, Err((StatusCode::BAD_REQUEST, _))), "long name must 400, got {long:?}");
+
+        // Address change: new value stored, verification restarts with a token row.
+        let new_email = format!("prof-new{stamp}@example.com");
+        let Json(changed) = update_profile_handler(
+            State(state.clone()), tenant.clone(),
+            Json(ProfileUpdate { display_name: None, email: Some(new_email.clone()) }),
+        ).await.expect("email change must succeed");
+        assert_eq!(changed, serde_json::json!({ "ok": true, "email_changed": true }));
+        let row = sqlx::query("SELECT email, email_verified_at FROM users WHERE id = $1")
+            .bind(uid).fetch_one(&state.pool).await.expect("row must exist");
+        let stored: String = row.try_get("email").unwrap_or_default();
+        assert_eq!(stored, new_email);
+        let tokens: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_verification_tokens WHERE user_id = $1")
+            .bind(uid).fetch_one(&state.pool).await.unwrap_or(0);
+        assert_eq!(tokens, 1, "one fresh verification token must exist");
+
+        // Repeating the same address: no-op, no extra token.
+        let Json(same) = update_profile_handler(
+            State(state.clone()), tenant.clone(),
+            Json(ProfileUpdate { display_name: None, email: Some(new_email.clone()) }),
+        ).await.expect("same email must succeed");
+        assert_eq!(same, serde_json::json!({ "ok": true, "email_changed": false }));
+        let tokens: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_verification_tokens WHERE user_id = $1")
+            .bind(uid).fetch_one(&state.pool).await.unwrap_or(0);
+        assert_eq!(tokens, 1, "same-address edit must not mint tokens");
+
+        // Taken address: second account blocks the grab.
+        let other = format!("prof-other{stamp}@example.com");
+        signup_handler(State(state.clone()), Json(SignupRequest { email: other.clone(), password: password.clone() }))
+            .await.expect("second signup must succeed");
+        let clash = update_profile_handler(
+            State(state.clone()), tenant.clone(),
+            Json(ProfileUpdate { display_name: None, email: Some(other) }),
+        ).await;
+        assert!(matches!(clash, Err((StatusCode::CONFLICT, _))), "taken email must 409, got {clash:?}");
+
+        // Empty name clears back to NULL.
+        let Json(cleared) = update_profile_handler(
+            State(state.clone()), tenant.clone(),
+            Json(ProfileUpdate { display_name: Some("   ".to_string()), email: None }),
+        ).await.expect("clear must succeed");
+        assert_eq!(cleared, serde_json::json!({ "ok": true, "email_changed": false }));
+        let name: Option<String> = sqlx::query_scalar("SELECT display_name FROM users WHERE id = $1")
+            .bind(uid).fetch_one(&state.pool).await.unwrap_or(None);
+        assert!(name.is_none(), "blank name must clear to NULL");
         super::page_tests::restore_signup_env(prev);
     }
 }

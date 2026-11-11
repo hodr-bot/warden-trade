@@ -19,6 +19,7 @@
       </div>
       <table class="table">
         <tbody>
+          <tr><th scope="row">Display name</th><td>{% match display_name %}{% when Some with (n) %}{{ n }}{% when None %}Not set{% endmatch %}</td></tr>
           <tr><th scope="row">Email</th><td>{{ email }}
             {% if email_verified %}<span class="pill">Verified</span>{% else %}<span class="pill">Unverified</span>{% endif %}
           </td></tr>
@@ -26,6 +27,29 @@
           <tr><th scope="row">Member since</th><td>{{ member_since }}</td></tr>
         </tbody>
       </table>
+    </section>
+
+    <section class="section" aria-label="Edit profile">
+      <div class="section-head">
+        <div>
+          <h2>Edit profile</h2>
+          <p>Display name shows on your public paper profile. Changing your email restarts verification.</p>
+        </div>
+      </div>
+      <form id="profile-form">
+        <div class="field">
+          <label for="profile-name">Display name</label>
+          <input id="profile-name" name="display_name" type="text" maxlength="40" autocomplete="nickname"
+                 value="{% match display_name %}{% when Some with (n) %}{{ n }}{% when None %}{% endmatch %}">
+        </div>
+        <div class="field">
+          <label for="profile-email">Email</label>
+          <input id="profile-email" name="email" type="email" autocomplete="email" value="{{ email }}">
+        </div>
+        <div id="profile-error" class="alert alert-danger" role="alert" hidden></div>
+        <div id="profile-ok" class="alert alert-success" role="status" hidden></div>
+        <button class="btn btn-primary" type="submit" id="profile-submit">Save profile</button>
+      </form>
     </section>
 
     <section class="section" aria-label="Change password">
@@ -199,6 +223,45 @@
     });
   });
 })();
+// Profile edit: display name (empty clears) + email (change restarts
+// verification; the badge updates on next page load).
+(function () {
+  var form = document.getElementById("profile-form");
+  if (!form) { return; }
+  var nameInput = document.getElementById("profile-name");
+  var emailInput = document.getElementById("profile-email");
+  var err = document.getElementById("profile-error");
+  var ok = document.getElementById("profile-ok");
+  var btn = document.getElementById("profile-submit");
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    err.hidden = true;
+    ok.hidden = true;
+    btn.disabled = true;
+    fetch("/api/auth/profile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        display_name: nameInput ? nameInput.value : "",
+        email: emailInput ? emailInput.value : ""
+      })
+    }).then(function (resp) {
+      if (!resp.ok) { return resp.text().then(function (t) { throw new Error(t || "Save failed."); }); }
+      return resp.json();
+    }).then(function (data) {
+      ok.hidden = false;
+      ok.textContent = (data && data.email_changed)
+        ? "Saved. New address — check your inbox to verify it."
+        : "Profile saved.";
+      btn.disabled = false;
+    }).catch(function (e) {
+      err.hidden = false;
+      err.textContent = e.message || "Save failed.";
+      btn.disabled = false;
+    });
+  });
+})();
+
 // Two-factor setup / confirm / disable. Guards on element presence: the
 // setup pane only exists while 2FA is off, the disable button only while on.
 (function () {
