@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Warden Trade - Forgot password</title>
+  {% include "_style.html" %}
+</head>
+<body class="page">
+  <main class="main container" id="forgot">
+    <section class="section auth-card" aria-label="Forgot password">
+      <div class="auth-head">
+        <span class="nav-brand-mark auth-logo" aria-hidden="true"></span>
+        <div class="muted auth-brand">Warden Trade</div>
+        <h1>Reset your password</h1>
+        <p class="muted auth-sub">Enter your address; if it exists, a 1-hour reset link is on its way.</p>
+      </div>
+      <form id="forgot-form">
+        <div class="field">
+          <label for="forgot-email">Email</label>
+          <input class="input" id="forgot-email" name="email" type="email" autocomplete="username" required />
+        </div>
+        <div id="forgot-error" class="alert alert-danger" role="alert" hidden></div>
+        <div id="forgot-ok" class="alert alert-success" role="status" hidden></div>
+        <button class="btn btn-primary btn-block" type="submit" id="forgot-submit">Send reset link</button>
+      </form>
+      <p class="auth-switch"><a href="/login">Back to sign in</a></p>
+      <p class="muted auth-foot">Paper trading only · no real funds.</p>
+    </section>
+  </main>
+<script>
+(function () {
+  // Blind request on purpose: the server always answers ok so the address
+  // book never leaks through this form.
+  var form = document.getElementById("forgot-form");
+  var err = document.getElementById("forgot-error");
+  var ok = document.getElementById("forgot-ok");
+  var btn = document.getElementById("forgot-submit");
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    err.hidden = true;
+    ok.hidden = true;
+    btn.disabled = true;
+    fetch("/api/auth/reset/request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: document.getElementById("forgot-email").value })
+    }).then(function () {
+      ok.hidden = false;
+      ok.textContent = "If the address exists, a reset link is on its way.";
+      btn.disabled = false;
+    }).catch(function () {
+      err.hidden = false;
+      err.textContent = "Could not reach the server. Try again.";
+      btn.disabled = false;
+    });
+  });
+})();
+</script>
+</body>
+</html>
