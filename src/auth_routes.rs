@@ -583,6 +583,13 @@ async fn issue_reset_token(
     Ok(raw)
 }
 
+/// `GET /forgot`: the password-request form (same SaaS card as login).
+/// Public and ungated: the underlying endpoint is blind by design, so the
+/// page leaks nothing whether the address exists or not.
+#[derive(askama::Template)]
+#[template(path = "forgot.html")]
+pub struct ForgotTemplate;
+
 /// `GET /reset?token=…`: renders the new-password form only when the token
 /// is live; unknown and expired tokens get the same failure page.
 #[derive(askama::Template)]
@@ -600,6 +607,10 @@ pub async fn reset_page_handler(
     axum::response::Html(
         ResetTemplate { token: query.token, ok: live }.render().unwrap_or_default(),
     )
+}
+
+pub async fn forgot_page_handler() -> axum::response::Html<String> {
+    axum::response::Html(ForgotTemplate.render().unwrap_or_default())
 }
 
 /// Look up the live user behind a reset token without consuming it.
@@ -1321,11 +1332,13 @@ pub async fn delete_account_handler(
 /// the browser stores nothing in `localStorage`.
 #[derive(askama::Template)]
 #[template(path = "login.html")]
-pub struct LoginTemplate;
+pub struct LoginTemplate {
+    pub signup_open: bool,
+}
 
 /// `GET /login` renders the sign-in form.
 pub async fn login_page_handler() -> axum::response::Html<String> {
-    axum::response::Html(LoginTemplate.render().unwrap_or_default())
+    axum::response::Html(LoginTemplate { signup_open: signup_enabled() }.render().unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -1348,14 +1361,31 @@ mod page_tests {
     }
 
     #[tokio::test]
-    async fn login_page_renders_form_without_db() {
-        let axum::response::Html(html) = login_page_handler().await;
-        assert!(html.contains("<form"), "login page must render a form, got {html:?}");
-        assert!(html.contains("/api/auth/login"), "form must target the login API");
-        assert!(html.contains("window.location.href = \"/\""), "login must redirect to the dashboard");
-        assert!(!html.contains("localStorage"), "session must live in the HttpOnly cookie, not localStorage");
-        assert!(html.contains("password-eye"), "login must offer a show/hide password toggle");
-        assert!(!html.contains("/signup"), "login must not advertise signup while it is closed");
+    async fn login_page_links() {
+        let _lock = signup_test_lock();
+        let prev = std::env::var("SIGNUP_ENABLED").ok();
+        std::env::remove_var("SIGNUP_ENABLED");
+        let axum::response::Html(closed) = login_page_handler().await;
+        assert!(closed.contains("<form"), "login page must render a form, got {closed:?}");
+        assert!(closed.contains("/api/auth/login"), "form must target the login API");
+        assert!(closed.contains("window.location.href = \"/\""), "login must redirect to the dashboard");
+        assert!(!closed.contains("localStorage"), "session must live in the HttpOnly cookie, not localStorage");
+        assert!(closed.contains("password-eye"), "login must offer a show/hide password toggle");
+        assert!(!closed.contains("/signup"), "login must not advertise signup while it is closed");
+        assert!(closed.contains("/forgot"), "login must link the forgot-password page");
+        std::env::set_var("SIGNUP_ENABLED", "1");
+        let axum::response::Html(open) = login_page_handler().await;
+        assert!(open.contains("/signup"), "login must advertise signup once it is open");
+        restore_signup_env(prev);
+    }
+
+    #[tokio::test]
+    async fn forgot_page_renders_form_without_db() {
+        let axum::response::Html(html) = forgot_page_handler().await;
+        assert!(html.contains("<form"), "forgot page must render a form, got {html:?}");
+        assert!(html.contains("/api/auth/reset/request"), "form must target the reset-request API");
+        assert!(html.contains("/login"), "forgot must link back to sign-in");
+        assert!(!html.contains("localStorage"), "no client-side secret store on the forgot page");
     }
 
     #[tokio::test]

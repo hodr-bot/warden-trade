@@ -44,13 +44,8 @@
         <button class="btn btn-primary btn-block" type="submit" id="totp-submit">Verify</button>
       </form>
       <p class="muted auth-foot">Paper trading only · no real funds.</p>
-      <details class="auth-recover">
-        <summary>Forgot your password?</summary>
-        <p class="muted">Enter your address; if it exists, a 1-hour reset link is on its way.</p>
-        <div id="recover-error" class="alert alert-danger" role="alert" hidden></div>
-        <div id="recover-ok" class="alert alert-success" role="status" hidden></div>
-        <button class="btn" type="button" id="recover-send">Send reset link</button>
-      </details>
+      {% if signup_open %}<p class="auth-switch">No account yet? <a href="/signup">Create one</a></p>{% endif %}
+      <p class="auth-switch"><a href="/forgot">Forgot your password?</a></p>
     </section>
   </main>
 <script>
@@ -143,28 +138,6 @@
       totpBtn.disabled = false;
     });
   });
-  // Password recovery: reuses the login email field, always reports ok so
-  // the address book never leaks through this button.
-  var recover = document.getElementById("recover-send");
-  if (recover) {
-    recover.addEventListener("click", function () {
-      var rerr = document.getElementById("recover-error");
-      var rok = document.getElementById("recover-ok");
-      rerr.hidden = true;
-      rok.hidden = true;
-      fetch("/api/auth/reset/request", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: document.getElementById("login-email").value })
-      }).then(function () {
-        rok.hidden = false;
-        rok.textContent = "If the address exists, a reset link is on its way.";
-      }).catch(function () {
-        rerr.hidden = false;
-        rerr.textContent = "Could not reach the server. Try again.";
-      });
-    });
-  }
 })();
 </script>
 </body>

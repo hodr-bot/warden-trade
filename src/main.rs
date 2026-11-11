@@ -84,6 +84,7 @@ async fn main() {
         .route("/login", get(auth_routes::login_page_handler))
         .route("/signup", get(auth_routes::signup_page_handler))
         .route("/verify", get(auth_routes::verify_page_handler))
+        .route("/forgot", get(auth_routes::forgot_page_handler))
         .route("/reset", get(auth_routes::reset_page_handler))
         .route("/account", get(auth_routes::account_page_handler))
         .route("/markets", get(markets::markets_page_handler))
