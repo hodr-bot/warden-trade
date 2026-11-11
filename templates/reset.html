@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Warden Trade - Reset password</title>
+  {% include "_style.html" %}
+</head>
+<body class="page">
+  <main class="main container" id="reset">
+    <section class="section auth-card" aria-label="Reset password">
+      <div class="auth-head">
+        <span class="nav-brand-mark auth-logo" aria-hidden="true"></span>
+        <div class="muted auth-brand">Warden Trade</div>
+        <h1>Choose a new password</h1>
+        <p class="muted auth-sub">Min 10 characters. Every older session dies on reset.</p>
+      </div>
+      <div id="reset-error" class="alert alert-danger" role="alert" hidden></div>
+      <div id="reset-ok" class="alert alert-success" role="status" hidden></div>
+      {% if ok %}
+      <form id="reset-form">
+        <input type="hidden" id="reset-token" value="{{ token }}" />
+        <div class="field">
+          <label for="reset-password">New password <span class="muted">(min 10 characters)</span></label>
+          <input class="input" id="reset-password" type="password" autocomplete="new-password" minlength="10" required />
+        </div>
+        <button class="btn btn-primary" type="submit" id="reset-submit">Set new password</button>
+      </form>
+      {% else %}
+      <div class="alert alert-danger" role="alert">This link is unknown or past its 1-hour window. Ask for a fresh one from the sign-in page.</div>
+      <p><a class="btn" href="/login">Back to sign in</a></p>
+      {% endif %}
+    </section>
+  </main>
+<script>
+(function () {
+  var form = document.getElementById("reset-form");
+  if (!form) return;
+  var err = document.getElementById("reset-error");
+  var ok = document.getElementById("reset-ok");
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    err.hidden = true;
+    ok.hidden = true;
+    fetch("/api/auth/reset/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        token: document.getElementById("reset-token").value,
+        new_password: document.getElementById("reset-password").value
+      })
+    }).then(function (resp) {
+      if (resp.status === 401) { throw new Error("This link expired. Ask for a fresh one."); }
+      if (!resp.ok) { throw new Error("Reset failed (HTTP " + resp.status + ")."); }
+      return resp.json();
+    }).then(function () {
+      ok.hidden = false;
+      ok.textContent = "Password updated. Redirecting to sign in…";
+      window.setTimeout(function () { window.location.href = "/login"; }, 1200);
+    }).catch(function (e) {
+      err.hidden = false;
+      err.textContent = e.message || "Reset failed.";
+    });
+  });
+})();
+</script>
+</body>
+</html>

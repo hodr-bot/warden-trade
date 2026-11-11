@@ -500,6 +500,147 @@ pub async fn resend_verification_handler(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// `POST /api/auth/reset/request`: start a password reset. Always `ok`,
+/// whether or not the address exists — the address book never leaks here.
+/// Real users get a 1-hour single-use link; unknown addresses get silence.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResetRequest {
+    pub email: String,
+}
+
+pub async fn request_reset_handler(
+    State(state): State<AppState>,
+    Json(req): Json<ResetRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let email = normalize_email(&req.email);
+    if valid_email(&email) {
+        let row: Option<(uuid::Uuid,)> = sqlx::query_as("SELECT id FROM users WHERE email = $1")
+            .bind(&email)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+        if let Some((user_id,)) = row {
+            match issue_reset_token(&state.pool, user_id, 1).await {
+                Ok(raw) => {
+                    let link = format!("{}/reset?token={raw}", public_base_url());
+                    let body = format!(
+                        "A password reset was requested for your Warden Trade account.\n\nChoose a new password here (1 hour, single use):\n{link}\n\nIf that was not you, ignore this message — your password is unchanged."
+                    );
+                    if let Err(e) = crate::mail::Mailer::from_env()
+                        .send(&email, "Warden Trade: reset your password", &body)
+                        .await
+                    {
+                        tracing::warn!("reset email failed for {email}: {e}");
+                    }
+                }
+                Err(e) => tracing::warn!("reset token failed for {email}: {e}"),
+            }
+        }
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Replace any outstanding reset token, return the fresh raw value.
+async fn issue_reset_token(
+    pool: &sqlx::PgPool,
+    user_id: uuid::Uuid,
+    ttl_hours: i64,
+) -> Result<String, sqlx::Error> {
+    let raw = new_raw_token();
+    let hash = token_hash(&raw);
+    sqlx::query("DELETE FROM password_reset_tokens WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&*pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, now() + $3::interval)",
+    )
+    .bind(user_id)
+    .bind(&hash)
+    .bind(format!("{ttl_hours} hours"))
+    .execute(&*pool)
+    .await?;
+    Ok(raw)
+}
+
+/// `GET /reset?token=…`: renders the new-password form only when the token
+/// is live; unknown and expired tokens get the same failure page.
+#[derive(askama::Template)]
+#[template(path = "reset.html")]
+pub struct ResetTemplate {
+    pub token: String,
+    pub ok: bool,
+}
+
+pub async fn reset_page_handler(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<VerifyQuery>,
+) -> axum::response::Html<String> {
+    let live = reset_token_user(&state.pool, &query.token).await.ok().flatten().is_some();
+    axum::response::Html(
+        ResetTemplate { token: query.token, ok: live }.render().unwrap_or_default(),
+    )
+}
+
+/// Look up the live user behind a reset token without consuming it.
+async fn reset_token_user(
+    pool: &sqlx::PgPool,
+    raw: &str,
+) -> Result<Option<uuid::Uuid>, sqlx::Error> {
+    let hash = token_hash(raw);
+    let row = sqlx::query("SELECT user_id, expires_at FROM password_reset_tokens WHERE token_hash = $1")
+        .bind(&hash)
+        .fetch_optional(&*pool)
+        .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    use sqlx::Row;
+    let user_id: uuid::Uuid = row.try_get("user_id")?;
+    let expires_at: chrono::DateTime<chrono::Utc> = row.try_get("expires_at")?;
+    if expires_at < chrono::Utc::now() {
+        return Ok(None);
+    }
+    Ok(Some(user_id))
+}
+
+/// `POST /api/auth/reset/confirm`: swap a live token for a new password.
+/// The password version bumps, so every session minted before the reset
+/// dies immediately — including sessions on devices the owner lost.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResetConfirm {
+    pub token: String,
+    pub new_password: String,
+}
+
+pub async fn confirm_reset_handler(
+    State(state): State<AppState>,
+    Json(req): Json<ResetConfirm>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if req.new_password.len() < MIN_PASSWORD_LEN {
+        return Err((StatusCode::BAD_REQUEST, format!("new password must be at least {MIN_PASSWORD_LEN} characters")));
+    }
+    let user_id = reset_token_user(&state.pool, &req.token)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?
+        .ok_or((StatusCode::UNAUTHORIZED, "reset link is invalid or expired".to_string()))?;
+    let new_hash = crate::auth::hash_password(&req.new_password)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "hash failed".to_string()))?;
+    let hash = token_hash(&req.token);
+    sqlx::query("DELETE FROM password_reset_tokens WHERE token_hash = $1")
+        .bind(&hash)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+    sqlx::query("UPDATE users SET password_hash = $1, pwd_ver = pwd_ver + 1 WHERE id = $2")
+        .bind(&new_hash)
+        .bind(user_id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 /// Account data shown on the settings page. Never a hash, never a token.
 #[derive(askama::Template)]
 #[template(path = "account.html")]
@@ -1106,6 +1247,119 @@ mod account_flow_tests {
         assert!(stamped.is_some(), "valid token must stamp email_verified_at");
         let replay = verify_page_handler(State(state.clone()), axum::extract::Query(VerifyQuery { token: raw })).await;
         assert!(replay.0.contains("invalid or expired"), "token must be single-use, got {:?}", replay.0);
+        super::page_tests::restore_signup_env(prev);
+    }
+
+    #[tokio::test]
+    async fn password_reset_roundtrip() {
+        let _lock = super::page_tests::signup_test_lock();
+        let prev = std::env::var("SIGNUP_ENABLED").ok();
+        std::env::set_var("SIGNUP_ENABLED", "1");
+        let Some(state) = proof_state() else {
+            super::page_tests::restore_signup_env(prev);
+            return;
+        };
+        let email = format!("reset{}@example.com", chrono::Utc::now().timestamp_millis());
+        let (status, _, Json(created)) = signup_handler(
+            State(state.clone()),
+            Json(SignupRequest { email: email.clone(), password: "correct-horse-10".to_string() }),
+        )
+        .await
+        .expect("signup must succeed");
+        assert_eq!(status, StatusCode::CREATED);
+        let old_token = created.token;
+
+        // Unknown address: same ok, no token row, nothing leaks.
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM password_reset_tokens").fetch_one(&state.pool).await.expect("count");
+        let Json(unknown) = request_reset_handler(
+            State(state.clone()),
+            Json(ResetRequest { email: "nobody-knows-this@example.com".to_string() }),
+        )
+        .await
+        .expect("unknown address must still return ok");
+        assert_eq!(unknown, serde_json::json!({ "ok": true }));
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM password_reset_tokens").fetch_one(&state.pool).await.expect("count");
+        assert_eq!(before, after, "unknown address must not mint a token");
+
+        // Known address: one token row appears.
+        let Json(known) = request_reset_handler(State(state.clone()), Json(ResetRequest { email: email.clone() })).await.expect("request must succeed");
+        assert_eq!(known, serde_json::json!({ "ok": true }));
+        use sqlx::Row;
+        let user_id: uuid::Uuid = sqlx::query("SELECT id FROM users WHERE email = $1")
+            .bind(&email)
+            .fetch_one(&state.pool)
+            .await
+            .expect("user row")
+            .try_get("id")
+            .expect("id");
+        let pending: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM password_reset_tokens WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&state.pool)
+                .await
+                .expect("token row");
+        assert_eq!(pending, 1, "reset request must issue exactly one token");
+
+        // Bad token and short password both rejected, session untouched.
+        let bad = confirm_reset_handler(
+            State(state.clone()),
+            Json(ResetConfirm { token: "bogus".to_string(), new_password: "a-brand-new-password-10".to_string() }),
+        )
+        .await;
+        assert!(matches!(bad, Err((StatusCode::UNAUTHORIZED, _))), "bogus token must 401, got {bad:?}");
+        let raw = super::new_raw_token();
+        let hash = super::token_hash(&raw);
+        sqlx::query(
+            "INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, now() + '1 hour'::interval)",
+        )
+        .bind(user_id)
+        .bind(&hash)
+        .execute(&state.pool)
+        .await
+        .expect("seed reset token");
+        let short = confirm_reset_handler(
+            State(state.clone()),
+            Json(ResetConfirm { token: raw.clone(), new_password: "short".to_string() }),
+        )
+        .await;
+        assert!(matches!(short, Err((StatusCode::BAD_REQUEST, _))), "short password must 400, got {short:?}");
+
+        // Valid confirm: password swaps, old password dead, old JWT dead.
+        let Json(ok) = confirm_reset_handler(
+            State(state.clone()),
+            Json(ResetConfirm { token: raw.clone(), new_password: "a-brand-new-password-10".to_string() }),
+        )
+        .await
+        .expect("confirm must succeed");
+        assert_eq!(ok, serde_json::json!({ "ok": true }));
+        let stale_login = login_handler(
+            State(state.clone()),
+            Json(LoginRequest { email: email.clone(), password: "correct-horse-10".to_string() }),
+        )
+        .await;
+        assert!(matches!(stale_login, Err((StatusCode::UNAUTHORIZED, _))), "old password must die, got {stale_login:?}");
+        let _ = login_handler(
+            State(state.clone()),
+            Json(LoginRequest { email: email.clone(), password: "a-brand-new-password-10".to_string() }),
+        )
+        .await
+        .expect("new password must work");
+        use axum::body::Body;
+        use axum::extract::FromRequestParts;
+        let req = axum::http::Request::builder()
+            .uri("/")
+            .header("Cookie", format!("warden_token={old_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let (mut parts, _) = req.into_parts();
+        let rejected = crate::state::Tenant::from_request_parts(&mut parts, &state).await;
+        assert!(rejected.is_err(), "pre-reset JWT must die with the password version bump");
+        let again = confirm_reset_handler(
+            State(state.clone()),
+            Json(ResetConfirm { token: raw, new_password: "another-new-password-10".to_string() }),
+        )
+        .await;
+        assert!(matches!(again, Err((StatusCode::UNAUTHORIZED, _))), "reset token must be single-use, got {again:?}");
         super::page_tests::restore_signup_env(prev);
     }
 }

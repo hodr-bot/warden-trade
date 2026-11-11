@@ -57,6 +57,8 @@ async fn main() {
         .route("/signup", post(auth_routes::signup_handler))
         .route("/change-password", post(auth_routes::change_password_handler))
         .route("/verify/resend", post(auth_routes::resend_verification_handler))
+        .route("/reset/request", post(auth_routes::request_reset_handler))
+        .route("/reset/confirm", post(auth_routes::confirm_reset_handler))
         .route("/account", axum::routing::delete(auth_routes::delete_account_handler))
         .route_layer(axum::middleware::from_fn_with_state(
             limiter,
@@ -68,6 +70,7 @@ async fn main() {
         .route("/login", get(auth_routes::login_page_handler))
         .route("/signup", get(auth_routes::signup_page_handler))
         .route("/verify", get(auth_routes::verify_page_handler))
+        .route("/reset", get(auth_routes::reset_page_handler))
         .route("/account", get(auth_routes::account_page_handler))
         .route("/markets", get(markets::markets_page_handler))
         .route("/orders", get(orders::orders_page_handler))
