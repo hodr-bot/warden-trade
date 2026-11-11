@@ -20,6 +20,8 @@
       <table class="table">
         <tbody>
           <tr><th scope="row">Display name</th><td>{% match display_name %}{% when Some with (n) %}{{ n }}{% when None %}Not set{% endmatch %}</td></tr>
+          <tr><th scope="row">Public page</th><td><a href="/u/{{ user_id }}">/u/{{ user_id }}</a>
+            <span class="muted">{% match display_name %}{% when Some with (_) %}live{% when None %}dark until you set a name{% endmatch %}</span></td></tr>
           <tr><th scope="row">Email</th><td>{{ email }}
             {% if email_verified %}<span class="pill">Verified</span>{% else %}<span class="pill">Unverified</span>{% endif %}
           </td></tr>

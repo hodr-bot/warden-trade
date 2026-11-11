@@ -951,6 +951,78 @@ pub async fn disable_totp_handler(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// Public paper profile: identity + workspace paper totals, read-only.
+///
+/// Opt-in by naming: the page exists only while `display_name` is set —
+/// clearing it (profile edit) takes the page dark (`404`). No email, no
+/// balances, no sessions: the only numbers are tenant-scoped paper fills
+/// and fees, labeled as workspace activity (per-user attribution lands
+/// with a future `paper_orders.user_id` column).
+#[derive(askama::Template)]
+#[template(path = "public_profile.html")]
+pub struct PublicProfileTemplate {
+    pub found: bool,
+    pub display_name: String,
+    pub member_since: String,
+    pub paper_trades: i64,
+    pub total_fees: f64,
+}
+
+pub async fn public_profile_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(user_id): axum::extract::Path<String>,
+) -> (StatusCode, axum::response::Html<String>) {
+    let not_found = || {
+        let page = PublicProfileTemplate {
+            found: false,
+            display_name: String::new(),
+            member_since: String::new(),
+            paper_trades: 0,
+            total_fees: 0.0,
+        };
+        (StatusCode::NOT_FOUND, axum::response::Html(page.render().unwrap_or_default()))
+    };
+    let uid: uuid::Uuid = match user_id.parse() {
+        Ok(id) => id,
+        Err(_) => return not_found(),
+    };
+    use sqlx::Row;
+    let row = sqlx::query("SELECT display_name, tenant_id, created_at FROM users WHERE id = $1")
+        .bind(uid)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None);
+    let Some(row) = row else { return not_found() };
+    let name: Option<String> = row.try_get("display_name").unwrap_or(None);
+    let Some(name) = name.filter(|n| !n.trim().is_empty()) else { return not_found() };
+    let tenant_id: uuid::Uuid = match row.try_get("tenant_id") {
+        Ok(id) => id,
+        Err(_) => return not_found(),
+    };
+    let created: chrono::DateTime<chrono::Utc> = match row.try_get("created_at") {
+        Ok(ts) => ts,
+        Err(_) => return not_found(),
+    };
+    let trades: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM paper_orders WHERE tenant_id = $1")
+        .bind(tenant_id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(0);
+    let fees: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(fee), 0) FROM paper_orders WHERE tenant_id = $1")
+        .bind(tenant_id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(0.0);
+    let page = PublicProfileTemplate {
+        found: true,
+        display_name: name,
+        member_since: created.format("%Y-%m-%d").to_string(),
+        paper_trades: trades,
+        total_fees: fees,
+    };
+    (StatusCode::OK, axum::response::Html(page.render().unwrap_or_default()))
+}
+
 /// Incoming profile edit: both fields optional, at least one required.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProfileUpdate {
@@ -1062,6 +1134,7 @@ pub async fn update_profile_handler(
 #[template(path = "account.html")]
 pub struct AccountTemplate {
     pub email: String,
+    pub user_id: String,
     pub display_name: Option<String>,
     pub role: String,
     pub member_since: String,
@@ -1108,6 +1181,7 @@ pub async fn account_page_handler(
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
     let page = AccountTemplate {
         email,
+        user_id: user_id.to_string(),
         display_name: row.try_get("display_name").unwrap_or(None),
         role,
         member_since: created.format("%Y-%m-%d").to_string(),
@@ -1333,6 +1407,7 @@ mod page_tests {
     async fn account_template_renders_profile_without_secrets() {
         let page = AccountTemplate {
             email: "trader@example.com".to_string(),
+            user_id: "00000000-0000-0000-0000-000000000000".to_string(),
             display_name: Some("Ace".to_string()),
             role: "member".to_string(),
             member_since: "2026-11-09".to_string(),
@@ -1352,6 +1427,7 @@ mod page_tests {
         assert!(!html.contains("localStorage"), "no client-side secret storage");
         let verified_page = AccountTemplate {
             email: "trader@example.com".to_string(),
+            user_id: "00000000-0000-0000-0000-000000000000".to_string(),
             display_name: None,
             role: "member".to_string(),
             member_since: "2026-11-09".to_string(),
@@ -2028,6 +2104,68 @@ mod account_flow_tests {
         let name: Option<String> = sqlx::query_scalar("SELECT display_name FROM users WHERE id = $1")
             .bind(uid).fetch_one(&state.pool).await.unwrap_or(None);
         assert!(name.is_none(), "blank name must clear to NULL");
+        super::page_tests::restore_signup_env(prev);
+    }
+
+    #[tokio::test]
+    async fn public_profile_visibility() {
+        let _lock = super::page_tests::signup_test_lock();
+        let prev = std::env::var("SIGNUP_ENABLED").ok();
+        std::env::set_var("SIGNUP_ENABLED", "1");
+        let Some(state) = proof_state() else {
+            super::page_tests::restore_signup_env(prev);
+            return;
+        };
+        let stamp = chrono::Utc::now().timestamp_millis();
+        let email = format!("pub{stamp}@example.com");
+        let password = "correct-horse-10".to_string();
+        signup_handler(State(state.clone()), Json(SignupRequest { email: email.clone(), password: password.clone() }))
+            .await.expect("signup must succeed");
+        let (_, _, Json(body)) = login_handler(
+            State(state.clone()),
+            Json(LoginRequest { email: email.clone(), password: password.clone() }),
+        ).await.expect("login must succeed");
+        let token = body.get("token").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let claims = crate::auth::decode_jwt(&token, state.jwt_secret.as_bytes()).expect("token must decode");
+        let tenant = crate::state::Tenant { tenant_id: claims.tenant_id.clone(), user_id: claims.sub.clone() };
+        let uid: uuid::Uuid = claims.sub.parse().expect("sub is a uuid");
+        let tid: uuid::Uuid = claims.tenant_id.parse().expect("tenant is a uuid");
+
+        // Nameless: dark, no address leak.
+        let (status, html) = super::public_profile_handler(State(state.clone()), axum::extract::Path(uid.to_string())).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let page = html.0;
+        assert!(page.contains("Profile not found"), "nameless page must 404, got {page}");
+        assert!(!page.contains(&email), "public page must never carry the address");
+
+        // Named: live with identity + workspace paper totals.
+        update_profile_handler(
+            State(state.clone()), tenant.clone(),
+            Json(ProfileUpdate { display_name: Some("Pub Star".to_string()), email: None }),
+        ).await.expect("naming must succeed");
+        sqlx::query("INSERT INTO paper_orders (tenant_id, exchange, symbol, side, qty, price, fee) VALUES ($1, 'kraken', 'BTC/EUR', 'buy', 0.01, 50000, 0.5)")
+            .bind(tid).execute(&state.pool).await.expect("seed paper fill");
+        let (status, html) = super::public_profile_handler(State(state.clone()), axum::extract::Path(uid.to_string())).await;
+        assert_eq!(status, StatusCode::OK);
+        let page = html.0;
+        assert!(page.contains("Pub Star"), "public page must show the name");
+        assert!(page.contains("Paper trades"), "public page must show paper totals");
+        assert!(page.contains("Paper fees paid"), "public page must show paper fees");
+        assert!(!page.contains(&email), "public page must never carry the address");
+
+        // Clearing the name takes the page dark again.
+        update_profile_handler(
+            State(state.clone()), tenant.clone(),
+            Json(ProfileUpdate { display_name: Some(String::new()), email: None }),
+        ).await.expect("clear must succeed");
+        let (status, _) = super::public_profile_handler(State(state.clone()), axum::extract::Path(uid.to_string())).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "cleared name must darken the page");
+
+        // Unknown id and garbage: same dark page, no oracle.
+        let (status, _) = super::public_profile_handler(State(state.clone()), axum::extract::Path(uuid::Uuid::new_v4().to_string())).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = super::public_profile_handler(State(state.clone()), axum::extract::Path("not-a-uuid".to_string())).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
         super::page_tests::restore_signup_env(prev);
     }
 }

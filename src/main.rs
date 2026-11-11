@@ -49,6 +49,15 @@ async fn main() {
         tracing::warn!("migrations not applied, running degraded: {e}");
     }
     let limiter = std::sync::Arc::new(ratelimit::RateLimiter::from_env());
+    // Public pages get their own looser bucket: profile views must never
+    // burn the auth budget that guards Argon2. Same 429 + Retry-After shape.
+    let public_limiter = std::sync::Arc::new(ratelimit::RateLimiter::new(120, 60));
+    let public_pages = Router::new()
+        .route("/u/:id", get(auth_routes::public_profile_handler))
+        .route_layer(axum::middleware::from_fn_with_state(
+            public_limiter,
+            ratelimit::limit_auth,
+        ));
     // Auth endpoints burn an Argon2 hash per attempt: they get their own
     // per-IP sliding window so unauthenticated CPU spend stays bounded.
     // (429 + Retry-After when over budget.)
@@ -83,6 +92,7 @@ async fn main() {
         .route("/api/orders", get(orders::orders_handler).post(orders::create_order_handler))
         .route("/api/backtest", get(backtest::backtest_handler))
         .nest("/api/auth", auth_api)
+        .merge(public_pages)
         .route("/api/auth/logout", post(auth_routes::logout_handler))
         .route("/api/reconcile", get(reconcile::reconcile_handler))
         .route("/api/agents", get(orchestrator::agents_handler))
