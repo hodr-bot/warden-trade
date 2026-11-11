@@ -218,8 +218,11 @@ where
     }
     let mut total = 0.0;
     for (symbol, fills) in &by_symbol {
-        let (qty, avg) = crate::dashboard::long_position(fills);
-        if qty > FLAT_EPS {
+        // Signed view: longs gain when the mark rises, shorts when it
+        // falls. A losing short must trip the daily-loss gate exactly
+        // like a losing long.
+        let (qty, avg) = crate::dashboard::net_position(fills);
+        if qty.abs() > FLAT_EPS {
             if let Some(mark) = marks.get(symbol) {
                 if mark.is_finite() && *mark > 0.0 {
                     total += (mark - avg) * qty;
@@ -264,17 +267,36 @@ pub fn utc_day_start_ts(now_ts: i64) -> i64 {
 ///   `marks`, J2) worse than `-max_daily_loss` → reject (entries only:
 ///   exits/sells always stay allowed so a losing day can be cut).
 ///
-/// J2 fail-closed: when any ledger read fails, **buys are denied**
-/// (`risk data unavailable`) while **sells stay allowed** — a blind
-/// ledger must never authorize new exposure, and must never trap an
-/// open position by blocking its exit. The ledger readers accept any
-/// executor; [`check_order_full`] takes the pool (see
+/// J2 fail-closed: when any ledger read fails, **entries are denied**
+/// (`risk data unavailable`) while provable **closes stay allowed** —
+/// a blind ledger must never authorize new exposure, and must never
+/// trap an open position by blocking its exit. Since paper shorts
+/// exist, a sell is only provably a close when the ledger shows a
+/// long covering it; with no ledger view at all, every write waits
+/// for the next tick. The ledger readers accept any executor;
+/// [`check_order_full`] takes the pool (see
 /// [`crate::orders::place_paper_order`], which serializes
 /// gate and insert behind a process-local per-app mutex so concurrent
 /// ticks and API calls cannot both pass the gate on the same ledger
 /// state — the deployment runs a single writer process).
 ///
-/// `sell` intents only face the hard floor: never block an exit.
+/// Paper shorts are opt-in: `SHORT_ENABLED=1` opens the short side,
+/// anything else keeps the historical long-or-flat behavior. Read live
+/// on every call so tests and operators retune without a restart.
+/// Agents cannot touch this: it is process env, not a DB row.
+pub fn short_enabled() -> bool {
+    matches!(
+        std::env::var("SHORT_ENABLED").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
+}
+
+/// `sell` intents only face the hard floor, except a sell that would
+/// drive the net position negative (open or extend a paper short):
+/// that is new exposure, so it faces the full entry gate and requires
+/// [`short_enabled`]. Never authorize blind exposure: without a ledger
+/// view no order passes at all, and the scheduler simply retries on
+/// the next tick.
 pub async fn check_order_full(
     pool: &sqlx::PgPool,
     tenant_id: uuid::Uuid,
@@ -283,19 +305,38 @@ pub async fn check_order_full(
     marks: &std::collections::BTreeMap<String, f64>,
 ) -> Result<(), String> {
     check_order(limits, intent)?;
-    if intent.side != "buy" {
+    // Fail-closed for every write when the ledger is blind: a sell
+    // is no longer provably an exit now that paper shorts exist (a
+    // flat book + sell = new short exposure), so no order passes
+    // without a ledger view. The scheduler retries on the next tick;
+    // nothing is trapped, just deferred.
+    let held = match net_qty_for(pool, tenant_id, &intent.symbol).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!("risk gate blind on net_qty_for, denying order: {e}");
+            return Err("risk data unavailable: entries blocked".to_string());
+        }
+    };
+    let after = if intent.side == "buy" {
+        held + intent.qty
+    } else {
+        held - intent.qty
+    };
+    // Pure closes pass like before: a sell covered by a long, or a
+    // buy covered by a short. Anything that grows exposure (or opens
+    // it from flat) faces the full entry gate below.
+    let is_close = intent.side != "buy" && held >= 0.0 && after >= 0.0
+        || intent.side == "buy" && held <= 0.0 && after <= 0.0;
+    if is_close {
         return Ok(());
     }
-    let held = net_qty_for(pool, tenant_id, &intent.symbol)
-        .await
-        .map_err(|e| {
-            tracing::warn!("risk gate blind on net_qty_for, denying buy: {e}");
-            "risk data unavailable: buys blocked".to_string()
-        })?;
+    if intent.side != "buy" && !short_enabled() {
+        return Err("paper shorts are disabled (SHORT_ENABLED=1 to open the short side)".to_string());
+    }
     if held.abs() <= FLAT_EPS {
         let open = open_position_count(pool, tenant_id).await.map_err(|e| {
-            tracing::warn!("risk gate blind on open_position_count, denying buy: {e}");
-            "risk data unavailable: buys blocked".to_string()
+            tracing::warn!("risk gate blind on open_position_count, denying entry: {e}");
+            "risk data unavailable: entries blocked".to_string()
         })?;
         if open >= limits.max_open_orders {
             return Err(format!(
@@ -304,7 +345,7 @@ pub async fn check_order_full(
             ));
         }
     }
-    let exposure = (held + intent.qty) * intent.price;
+    let exposure = after.abs() * intent.price;
     if exposure.is_finite() && exposure > limits.max_exposure_per_asset {
         return Err(format!(
             "exposure {exposure:.2} exceeds max_exposure_per_asset {}",
@@ -314,16 +355,16 @@ pub async fn check_order_full(
     let today = realized_since(pool, tenant_id, utc_day_start_ts(chrono::Utc::now().timestamp()))
         .await
         .map_err(|e| {
-            tracing::warn!("risk gate blind on realized_since, denying buy: {e}");
-            "risk data unavailable: buys blocked".to_string()
+            tracing::warn!("risk gate blind on realized_since, denying entry: {e}");
+            "risk data unavailable: entries blocked".to_string()
         })?;
     let floating = open_unrealized(pool, tenant_id, marks).await.map_err(|e| {
-        tracing::warn!("risk gate blind on open_unrealized, denying buy: {e}");
-        "risk data unavailable: buys blocked".to_string()
+        tracing::warn!("risk gate blind on open_unrealized, denying entry: {e}");
+        "risk data unavailable: entries blocked".to_string()
     })?;
     if today + floating < -limits.max_daily_loss {
         return Err(format!(
-            "daily loss {today:.2} + unrealized {floating:.2} exceeds max_daily_loss {}: sells only",
+            "daily loss {today:.2} + unrealized {floating:.2} exceeds max_daily_loss {}: closes only",
             limits.max_daily_loss
         ));
     }
@@ -583,8 +624,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fail_closed_buy_denied_sell_allowed_without_db() {
-        // Unreachable ledger: buys must be denied, sells stay allowed.
+    async fn fail_closed_entries_denied_without_db() {
+        // Unreachable ledger: no write passes without a ledger view. A
+        // blind sell can no longer be proven an exit (flat book + sell
+        // = new short exposure), so it waits for the next tick like a
+        // buy. Nothing is trapped: the scheduler simply retries.
         let pool = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/none")
             .expect("lazy pool must build");
         let lim = wide_limits();
@@ -599,7 +643,7 @@ mod tests {
         .await
         .expect_err("blind-ledger buy must be denied");
         assert!(err.contains("risk data unavailable"), "unexpected: {err}");
-        check_order_full(
+        let err = check_order_full(
             &pool,
             t,
             &lim,
@@ -607,7 +651,8 @@ mod tests {
             &std::collections::BTreeMap::new(),
         )
         .await
-        .expect("blind-ledger sell must stay allowed");
+        .expect_err("blind-ledger sell must be denied");
+        assert!(err.contains("risk data unavailable"), "unexpected: {err}");
     }
 
     #[tokio::test]
@@ -670,11 +715,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn db_daily_loss_gate_blocks_buys_but_not_sells() {
+    async fn db_daily_loss_gate_blocks_entries_but_not_covered_closes() {
         let Some(pool) = proof_pool().await else { return };
         let t = proof_tenant(&pool, "max_daily_loss", "10").await;
-        // Realized today: buy 1 @ 100, sell 1 @ 50 → -50, beyond the 10 limit.
-        proof_fill(&pool, t, "BTC-USD", "buy", 1.0, 100.0).await;
+        // Realized today: buy 2 @ 100, sell 1 @ 50 → -50, beyond the 10
+        // limit. Net book stays long 1 @ 100, so a covered sell below is
+        // provably a close, not new exposure.
+        proof_fill(&pool, t, "BTC-USD", "buy", 2.0, 100.0).await;
         proof_fill(&pool, t, "BTC-USD", "sell", 1.0, 50.0).await;
 
         let mut lim = wide_limits();
@@ -683,9 +730,77 @@ mod tests {
             .await
             .expect_err("buy after daily loss must be rejected");
         assert!(err.contains("daily loss"), "unexpected: {err}");
-        // Exits stay open: never trap a position because the day went red.
+        // Covered exits stay open: never trap a position because the
+        // day went red.
         gate_proof(&pool, t, &lim, &proof_intent("BTC-USD", "sell", 0.1, 60.0))
             .await
-            .expect("sells must stay allowed after daily loss");
+            .expect("covered sells must stay allowed after daily loss");
+        // But a naked sell at flat is a short opener, not a close: it
+        // faces the entry gate (and the flag) like any new exposure.
+        let err = gate_proof(&pool, t, &lim, &proof_intent("ETH-USD", "sell", 0.1, 60.0))
+            .await
+            .expect_err("naked sell after daily loss must be rejected");
+        assert!(
+            err.contains("disabled") || err.contains("daily loss"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// Sets `SHORT_ENABLED=1` for the duration of the test, restoring
+    /// the previous value on drop — even on panic — so parallel tests
+    /// never observe a leaked flag.
+    struct ShortEnv {
+        prev: Option<String>,
+    }
+
+    impl ShortEnv {
+        fn on() -> Self {
+            let prev = std::env::var("SHORT_ENABLED").ok();
+            std::env::set_var("SHORT_ENABLED", "1");
+            ShortEnv { prev }
+        }
+    }
+
+    impl Drop for ShortEnv {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("SHORT_ENABLED", v),
+                None => std::env::remove_var("SHORT_ENABLED"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn db_short_flag_lifecycle() {
+        // Single test (not three) so no parallel test can observe a
+        // half-set flag: the whole open → cover cycle runs in order.
+        let Some(pool) = proof_pool().await else { return };
+        let lim = wide_limits();
+        let t = proof_tenant(&pool, "max_order_notional", "1000000").await;
+        // Flat book, flag off: the sell would open a short → refused.
+        let err = gate_proof(&pool, t, &lim, &proof_intent("BTC-USD", "sell", 0.01, 70_000.0))
+            .await
+            .expect_err("flat sell with shorts disabled must be rejected");
+        assert!(err.contains("disabled"), "unexpected: {err}");
+        // Same book, flag on: the short faces the normal entry gate
+        // and passes on wide limits.
+        let flag = ShortEnv::on();
+        gate_proof(&pool, t, &lim, &proof_intent("BTC-USD", "sell", 0.01, 70_000.0))
+            .await
+            .expect("flat sell with shorts enabled must pass the entry gate");
+        // Record the opened short, drop the flag, then prove the cover
+        // is a close: it passes with the flag off. Positions are never
+        // trapped by the flag.
+        proof_fill(&pool, t, "BTC-USD", "sell", 1.0, 100.0).await;
+        drop(flag);
+        gate_proof(&pool, t, &lim, &proof_intent("BTC-USD", "buy", 0.5, 90.0))
+            .await
+            .expect("covering a short must pass without the flag");
+        // But flipping past flat (buy 2 > short 1) is new exposure:
+        // still gated (passes here on wide limits, with the flag off
+        // because a buy never needs it).
+        gate_proof(&pool, t, &lim, &proof_intent("BTC-USD", "buy", 2.0, 90.0))
+            .await
+            .expect("flip-through buy passes the entry gate on wide limits");
     }
 }

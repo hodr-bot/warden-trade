@@ -364,14 +364,37 @@ pub async fn run_cycle_handler(
     Ok(Json(decisions))
 }
 
-/// Fetch recent 5-minute closes for `symbol` from Coinbase, oldest first.
+/// Candle granularity (seconds) for the live feed. Default 300 (5m,
+/// historical behavior). The 1h research package runs at 3600:
+/// `LIVE_GRANULARITY_SEC=3600`. Read live on every call so operators
+/// retune without a restart.
+pub fn live_granularity_sec() -> u64 {
+    std::env::var("LIVE_GRANULARITY_SEC")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|g| (60..=86_400).contains(g))
+        .unwrap_or(300)
+}
+
+/// Strategy feeding the scheduler's signal. Default `aggregate` (vote
+/// of sma-cross + mean-reversion + momentum, historical behavior).
+/// `mr` runs mean-reversion alone — the only family that measured
+/// above 50% winrate out-of-sample on 1h data (55-70% across the
+/// three products, fees aside). Read live on every call.
+pub fn strategy_mode() -> String {
+    std::env::var("STRATEGY_MODE").unwrap_or_else(|_| "aggregate".to_string())
+}
+
+/// Fetch recent closes for `symbol` from Coinbase, oldest first.
 ///
-/// Pure feed read for the cycle; any failure degrades to an empty
-/// series (the cycle then holds). Never panics, never logs secrets.
+/// Granularity comes from [`live_granularity_sec`]; any failure
+/// degrades to an empty series (the cycle then holds). Never panics,
+/// never logs secrets.
 pub async fn live_closes_for(symbol: &str) -> Result<Vec<f64>, String> {
     let client = crate::coinbase::CoinbaseClient::new();
+    let granularity = live_granularity_sec();
     let candles = client
-        .fetch_candles(symbol, 300)
+        .fetch_candles(symbol, granularity)
         .await
         .map_err(|e| format!("feed: {e}"))?;
     Ok(candles.iter().map(|c| c.close).collect())
