@@ -20,7 +20,10 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-/// Net long position: quantity held and average entry price.
+/// Net position: signed quantity held and average entry price.
+///
+/// `qty > 0` = net long at average cost, `qty < 0` = net short at
+/// average sale proceeds. `(0, _)` means flat.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Position {
     pub qty: f64,
@@ -111,7 +114,7 @@ pub fn check_exit(symbol: &str, price: f64, position: Option<Position>) -> ExitC
     if entry.cooldown_left > 0 {
         entry.cooldown_left -= 1;
         let left = entry.cooldown_left;
-        if position.map(|p| p.qty).unwrap_or(0.0) <= 0.0 {
+        if position.map(|p| p.qty).unwrap_or(0.0).abs() <= f64::EPSILON {
             entry.peak = 0.0;
         }
         return if left > 0 {
@@ -125,39 +128,65 @@ pub fn check_exit(symbol: &str, price: f64, position: Option<Position>) -> ExitC
         entry.peak = 0.0;
         return ExitCheck::Hold;
     };
-    if pos.qty <= 0.0 || pos.avg <= 0.0 || price <= 0.0 {
+    if pos.qty.abs() <= f64::EPSILON || pos.avg <= 0.0 || price <= 0.0 {
         return ExitCheck::Hold;
     }
+    let is_short = pos.qty < 0.0;
 
     // Take-profit wins over the stop when both bands touch (gap move).
-    if tp_pct > 0.0 && price >= pos.avg * (1.0 + tp_pct) {
+    // Mirror for shorts: profit is the price FALLING `tp_pct` below
+    // the average sale proceeds.
+    let tp_hit = tp_pct > 0.0
+        && (!is_short && price >= pos.avg * (1.0 + tp_pct)
+            || is_short && price <= pos.avg * (1.0 - tp_pct));
+    if tp_hit {
         entry.peak = 0.0;
         entry.cooldown_left = cooldown_ticks;
+        let (verb, op, bound) = if is_short {
+            ("<=", "x", 1.0 - tp_pct)
+        } else {
+            (">=", "x", 1.0 + tp_pct)
+        };
         return ExitCheck::Exit {
-            qty: pos.qty,
+            qty: pos.qty.abs(),
             reason: format!(
-                "take-profit: {symbol} {price:.2} >= entry {avg:.2} x {mult:.3}",
+                "take-profit: {symbol} {price:.2} {verb} entry {avg:.2} {op} {bound:.3}",
                 avg = pos.avg,
-                mult = 1.0 + tp_pct,
             ),
             kind: ExitKind::TakeProfit,
         };
     }
 
     if stop_pct > 0.0 {
-        if entry.peak < pos.avg.max(price) {
+        // Trailing peak follows the favorable extreme: highs for a
+        // long, lows for a short. Fixed mode anchors on entry.
+        if is_short {
+            let low = if price < pos.avg { price } else { pos.avg };
+            if entry.peak <= 0.0 || low < entry.peak {
+                entry.peak = low;
+            }
+        } else if entry.peak < pos.avg.max(price) {
             entry.peak = pos.avg.max(price);
         }
         let reference = if trailing { entry.peak } else { pos.avg };
-        if price <= reference * (1.0 - stop_pct) {
+        let sl_hit = if is_short {
+            price >= reference * (1.0 + stop_pct)
+        } else {
+            price <= reference * (1.0 - stop_pct)
+        };
+        if sl_hit {
             entry.peak = 0.0;
             entry.cooldown_left = cooldown_ticks;
             let mode = if trailing { "trailing" } else { "fixed" };
+            let (verb, mult) = if is_short {
+                (">=", 1.0 + stop_pct)
+            } else {
+                ("<=", 1.0 - stop_pct)
+            };
             return ExitCheck::Exit {
-                qty: pos.qty,
+                qty: pos.qty.abs(),
                 reason: format!(
-                    "stop-loss ({mode}): {symbol} {price:.2} <= ref {reference:.2} x {mult:.3}",
-                    mult = 1.0 - stop_pct,
+                    "stop-loss ({mode}): {symbol} {price:.2} {verb} ref {reference:.2} x {mult:.3}",
                 ),
                 kind: ExitKind::StopLoss,
             };
@@ -278,9 +307,10 @@ fn cooldown_left(symbol: &str) -> u32 {
 
 /// Spot-sized sell capped at the held long: never sell what we don't own.
 ///
-/// Returns `0` when flat (caller skips: no short selling on spot paper).
-/// Otherwise `min(sized, held)`: a profitable signal takes gains without
-/// inventing exposure.
+/// Returns `0` when flat or net-short — the long-side cap. Short
+/// entries and covers go through the risk gate
+/// ([`crate::risk::check_order_full`]) and
+/// [`crate::scheduler::cap_cover_qty`], not this helper.
 pub fn cap_sell_qty(sized: f64, held: f64) -> f64 {
     if held <= 0.0 || sized <= 0.0 {
         0.0
@@ -550,5 +580,82 @@ mod tests {
         );
         std::env::remove_var("STOP_LOSS_PCT");
         std::env::remove_var("TAKE_PROFIT_PCT");
+    }
+
+    #[test]
+    fn short_take_profit_when_price_falls() {
+        let _guard = test_serial_lock();
+        reset_exit_state();
+        std::env::set_var("STOP_LOSS_PCT", "0.0");
+        std::env::set_var("TAKE_PROFIT_PCT", "0.05");
+        std::env::set_var("EXIT_COOLDOWN_TICKS", "0");
+        // Short 1 @ 100: -4% holds, -6% takes profit. The exit qty is
+        // the absolute (cover) size, never negative.
+        assert_eq!(check_exit("BTC-USD", 96.0, pos(-1.0, 100.0)), ExitCheck::Hold);
+        match check_exit("ETH-USD", 94.0, pos(-1.0, 100.0)) {
+            ExitCheck::Exit { qty, kind, .. } => {
+                assert_eq!(kind, ExitKind::TakeProfit);
+                assert!((qty - 1.0).abs() < 1e-9, "cover qty={qty}");
+            }
+            other => panic!("expected short take-profit, got {other:?}"),
+        }
+        std::env::remove_var("STOP_LOSS_PCT");
+        std::env::remove_var("TAKE_PROFIT_PCT");
+        std::env::remove_var("EXIT_COOLDOWN_TICKS");
+    }
+
+    #[test]
+    fn short_stop_when_price_rises() {
+        let _guard = test_serial_lock();
+        reset_exit_state();
+        std::env::set_var("STOP_LOSS_PCT", "0.02");
+        std::env::set_var("TAKE_PROFIT_PCT", "0.0");
+        std::env::set_var("TRAILING_STOP", "false");
+        std::env::set_var("EXIT_COOLDOWN_TICKS", "0");
+        // Short 1 @ 100, fixed stop: +1% holds, past +2% exits.
+        assert_eq!(check_exit("BTC-USD", 101.0, pos(-1.0, 100.0)), ExitCheck::Hold);
+        match check_exit("ETH-USD", 102.5, pos(-1.0, 100.0)) {
+            ExitCheck::Exit { qty, kind, .. } => {
+                assert_eq!(kind, ExitKind::StopLoss);
+                assert!((qty - 1.0).abs() < 1e-9, "cover qty={qty}");
+            }
+            other => panic!("expected short stop-loss, got {other:?}"),
+        }
+        std::env::remove_var("STOP_LOSS_PCT");
+        std::env::remove_var("TAKE_PROFIT_PCT");
+        std::env::remove_var("TRAILING_STOP");
+        std::env::remove_var("EXIT_COOLDOWN_TICKS");
+    }
+
+    #[test]
+    fn short_trailing_stop_tracks_the_lows() {
+        let _guard = test_serial_lock();
+        reset_exit_state();
+        std::env::set_var("STOP_LOSS_PCT", "0.02");
+        std::env::set_var("TAKE_PROFIT_PCT", "0.0");
+        std::env::set_var("TRAILING_STOP", "true");
+        std::env::set_var("EXIT_COOLDOWN_TICKS", "0");
+        // Short 1 @ 100, price slides to 90: the trailing low follows.
+        // A bounce to 92 stays inside +2% of 90 → Hold; past 91.8...
+        assert_eq!(check_exit("BTC-USD", 90.0, pos(-1.0, 100.0)), ExitCheck::Hold);
+        assert_eq!(peak_for("BTC-USD"), 90.0);
+        assert_eq!(check_exit("BTC-USD", 91.0, pos(-1.0, 100.0)), ExitCheck::Hold);
+        match check_exit("BTC-USD", 92.0, pos(-1.0, 100.0)) {
+            ExitCheck::Exit { kind, .. } => assert_eq!(kind, ExitKind::StopLoss),
+            other => panic!("expected trailing short stop, got {other:?}"),
+        }
+        std::env::remove_var("STOP_LOSS_PCT");
+        std::env::remove_var("TAKE_PROFIT_PCT");
+        std::env::remove_var("TRAILING_STOP");
+        std::env::remove_var("EXIT_COOLDOWN_TICKS");
+    }
+
+    #[test]
+    fn cover_capped_at_what_is_owed() {
+        // Mirror of cap_sell_qty: a cover can never flip the book long.
+        use crate::scheduler::cap_cover_qty;
+        assert_eq!(cap_cover_qty(1.5, 0.0), 0.0);
+        assert_eq!(cap_cover_qty(1.5, 0.4), 0.4);
+        assert_eq!(cap_cover_qty(0.2, 0.4), 0.2);
     }
 }

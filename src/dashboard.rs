@@ -162,38 +162,15 @@ pub async fn cached_usd_eur() -> Option<f64> {
     rate.or(cached)
 }
 
-/// Net long position from fills: `(qty, average entry price)`.
+/// Signed net position from FIFO fills: `(net_qty, net_avg_price)`.
 ///
-/// FIFO consumption of buys by sells. `(0, 0)` when flat or net-short:
-/// protective exits only manage long exposure.
-pub fn long_position(fills: &[(String, f64, f64)]) -> (f64, f64) {
-    let mut lots: Vec<(f64, f64)> = Vec::new();
-    for (side, qty, price) in fills {
-        if side == "buy" {
-            lots.push((*qty, *price));
-        } else {
-            let mut rest = *qty;
-            while rest > 0.0 {
-                match lots.first_mut() {
-                    Some((q, _)) => {
-                        let m = rest.min(*q);
-                        *q -= m;
-                        rest -= m;
-                        if *q <= 0.0 {
-                            lots.remove(0);
-                        }
-                    }
-                    None => break,
-                }
-            }
-        }
-    }
-    let qty: f64 = lots.iter().map(|(q, _)| q).sum();
-    if qty <= 0.0 {
-        return (0.0, 0.0);
-    }
-    let notional: f64 = lots.iter().map(|(q, p)| q * p).sum();
-    (qty, notional / qty)
+/// The quantity keeps its sign: positive = net long at average cost,
+/// negative = net short at average sale proceeds, `(0, 0)` when flat.
+/// Backed by [`fifo_pnl`], so this view can never disagree with the
+/// ledger on what is held.
+pub fn net_position(fills: &[(String, f64, f64)]) -> (f64, f64) {
+    let (_, _, _, net, avg) = fifo_pnl(fills);
+    (net, avg)
 }
 
 /// FIFO PnL over `(side, qty, price)` fills, oldest first.
@@ -533,6 +510,25 @@ mod tests {
         assert_eq!(realized, 10.0);
         assert_eq!((closed, wins), (1, 1));
         assert_eq!(net, 0.0);
+    }
+
+    #[test]
+    fn net_position_is_signed_and_agrees_with_fifo() {
+        // Long only: average cost.
+        let (q, a) = net_position(&[fill("buy", 2.0, 100.0)]);
+        assert_eq!((q, a), (2.0, 100.0));
+        // Short only: average SALE proceeds (the cover price), negative qty.
+        let (q, a) = net_position(&[fill("sell", 1.0, 110.0)]);
+        assert_eq!((q, a), (-1.0, 110.0));
+        // Mixed: buy 2 @ 100, sell 3 @ 110 → short 1 @ 110.
+        let (q, a) = net_position(&[
+            fill("buy", 2.0, 100.0),
+            fill("sell", 3.0, 110.0),
+        ]);
+        assert_eq!((q, a), (-1.0, 110.0));
+        // Round trip → flat zero.
+        let (q, a) = net_position(&[fill("buy", 1.0, 100.0), fill("sell", 1.0, 150.0)]);
+        assert_eq!((q, a), (0.0, 0.0));
     }
 
     #[test]

@@ -9,9 +9,11 @@
 //! risk-gated [`place_paper_order`](crate::orders::place_paper_order)
 //! path as the manual API.
 //!
-//! Position discipline: a signal matching the side of the tenant's most
-//! recent order for the symbol is skipped (`already positioned`), so the
-//! bot alternates long/flat instead of stacking. The idempotency key
+//! Position discipline: a signal matching the side of the open net
+//! position is skipped (`already positioned long/short`), and a repeat
+//! signal on a flat book is skipped when the last order was on the
+//! same side — so the bot holds one signed position per symbol instead
+//! of stacking. The idempotency key
 //! pins each cycle slot, so a retried cycle can never double-place.
 //! `SCHEDULER_ENABLED=false` disables the loop; the kill switch in
 //! `risk_limits` stays the emergency brake (checked on every order).
@@ -80,11 +82,15 @@ async fn last_side(pool: &sqlx::PgPool, tenant_id: uuid::Uuid, symbol: &str) -> 
     row.map(|r| r.0)
 }
 
-/// Open long on a symbol from fills: `(qty, average entry price)`.
+/// Signed net position for `symbol`: `(net_qty, net_avg_price)`.
 ///
-/// `(0, 0)` when flat or net-short. Used to forbid short selling:
-/// a `sell` signal with nothing held is skipped, never executed.
-async fn long_held(pool: &sqlx::PgPool, tenant_id: uuid::Uuid, symbol: &str) -> (f64, f64) {
+/// Positive = net long at average cost, negative = net short at
+/// average sale proceeds, `(0, 0)` when flat. Backed by
+/// [`crate::dashboard::net_position`] (FIFO, oldest first — hence
+/// the explicit `ORDER BY created_at ASC`). Replaces the old
+/// long-only `long_held`: sells are no longer capped at zero, they
+/// open paper shorts when [`crate::risk::short_enabled`].
+async fn net_held(pool: &sqlx::PgPool, tenant_id: uuid::Uuid, symbol: &str) -> (f64, f64) {
     let fills: Vec<(String, f64, f64)> = sqlx::query_as(
         "SELECT side, qty, price FROM paper_orders WHERE tenant_id = $1 AND symbol = $2 ORDER BY created_at ASC",
     )
@@ -93,7 +99,18 @@ async fn long_held(pool: &sqlx::PgPool, tenant_id: uuid::Uuid, symbol: &str) -> 
     .fetch_all(pool)
     .await
     .unwrap_or_default();
-    crate::dashboard::long_position(&fills)
+    crate::dashboard::net_position(&fills)
+}
+
+/// Mirror of [`crate::exits::cap_sell_qty`] for the short side: cap a
+/// covering buy at what the short owes, so a cover can never flip the
+/// book long by itself.
+pub(crate) fn cap_cover_qty(sized: f64, owed: f64) -> f64 {
+    if owed <= 0.0 || sized <= 0.0 {
+        0.0
+    } else {
+        sized.min(owed)
+    }
 }
 
 /// One protective-exit evaluation for `symbol` at `price`.
@@ -121,27 +138,39 @@ async fn run_exit(
     price: f64,
 ) -> Option<String> {
     use crate::exits::{cap_sell_qty, check_exit, release_cooldown, ExitCheck};
-    let (held, avg) = long_held(&state.pool, tenant_id, symbol).await;
-    let position = if held > 0.0 {
+    // Signed position: a short exits via a covering BUY, a long via a
+    // SELL. `cap_sell_qty(qty, held)` only fits the long side; the
+    // short side caps the cover at what is owed (mirror helper below).
+    let (held, avg) = net_held(&state.pool, tenant_id, symbol).await;
+    let position = if held.abs() > 0.0 {
         Some(crate::exits::Position { qty: held, avg })
     } else {
         None
     };
     let summary = match check_exit(symbol, price, position) {
         ExitCheck::Exit { qty, reason, .. } => {
-            let capped = cap_sell_qty(qty, held);
+            let is_short = held < 0.0;
+            let capped = if is_short {
+                cap_cover_qty(qty, -held)
+            } else {
+                cap_sell_qty(qty, held)
+            };
             if capped <= 0.0 {
                 Some(format!("{symbol} exit skipped: nothing held ({reason})"))
             } else {
                 let slot = chrono::Utc::now().timestamp() / scheduler_interval_secs() as i64;
-                let key = format!("exit-sell-{symbol}-{slot}");
+                let (side, key, verb) = if is_short {
+                    ("buy", format!("exit-cover-{symbol}-{slot}"), "covered")
+                } else {
+                    ("sell", format!("exit-sell-{symbol}-{slot}"), "sold")
+                };
                 match crate::orders::place_paper_order(
-                    state, tenant_id, "coinbase", symbol, "sell", capped, price, Some(&key),
+                    state, tenant_id, "coinbase", symbol, side, capped, price, Some(&key),
                 )
                 .await
                 {
                     Ok(order) => Some(format!(
-                        "{symbol} protective exit {reason}: sold {} @ {:.2} (id {})",
+                        "{symbol} protective exit {reason}: {verb} {} @ {:.2} (id {})",
                         order.qty, order.price, order.id
                     )),
                     Err((status, msg)) => {
@@ -201,6 +230,19 @@ async fn tick_symbol(
     let action_of = |id: &str| decisions.iter().find(|d| d.agent == id).map(|d| d.action.as_str());
     let (strategy, risk, execution) =
         (action_of("strategy"), action_of("risk"), action_of("execution"));
+    // STRATEGY_MODE=mr: the scheduler trades the mean-reversion vote
+    // alone (z-score 20, ±1.5) instead of the aggregate. The full
+    // cycle is still recorded above, so the dashboard keeps showing
+    // every agent — only the executed signal changes source.
+    let strategy = if crate::orchestrator::strategy_mode() == "mr" {
+        match crate::strategies::mean_reversion_signal(&closes).signal {
+            crate::strategies::Signal::Buy => Some("buy"),
+            crate::strategies::Signal::Sell => Some("sell"),
+            crate::strategies::Signal::Hold => Some("hold"),
+        }
+    } else {
+        strategy
+    };
     if strategy != Some("buy") && strategy != Some("sell") {
         return format!("{symbol} hold: strategy={}", strategy.unwrap_or("?"));
     }
@@ -221,33 +263,74 @@ async fn tick_symbol(
         return summary;
     }
     if side == "sell" {
-        // No short selling on spot paper: cap the sell at what we hold.
-        let (held, _) = long_held(&state.pool, tenant_id, symbol).await;
-        let capped = crate::exits::cap_sell_qty(sized_qty(&closes, price), held);
-        if capped <= 0.0 {
-            return format!("{symbol} skipped: sell signal with no position held");
+        // Signed book: a sell on a long closes it (as before); a sell
+        // on flat opens a paper short when SHORT_ENABLED=1; a sell on
+        // an open short is a no-op (already positioned).
+        let (net, _) = net_held(&state.pool, tenant_id, symbol).await;
+        if net < 0.0 {
+            return format!("{symbol} skipped: already positioned short");
         }
-        let slot = chrono::Utc::now().timestamp() / scheduler_interval_secs() as i64;
-        let key = format!("sched-{side}-{symbol}-{slot}");
-        match crate::orders::place_paper_order(
-            state,
-            tenant_id,
-            "coinbase",
-            symbol,
-            side,
-            capped,
-            price,
-            Some(&key),
-        )
-        .await
-        {
-            Ok(order) => {
-                return format!(
-                    "{symbol} placed {side} {} @ {:.2} (id {})",
-                    order.qty, order.price, order.id
-                )
+        if net > 0.0 {
+            let capped = crate::exits::cap_sell_qty(sized_qty(&closes, price), net);
+            if capped <= 0.0 {
+                return format!("{symbol} skipped: sell signal with no position held");
             }
-            Err((status, msg)) => return format!("{symbol} order rejected ({status}): {msg}"),
+            let slot = chrono::Utc::now().timestamp() / scheduler_interval_secs() as i64;
+            let key = format!("sched-{side}-{symbol}-{slot}");
+            match crate::orders::place_paper_order(
+                state,
+                tenant_id,
+                "coinbase",
+                symbol,
+                side,
+                capped,
+                price,
+                Some(&key),
+            )
+            .await
+            {
+                Ok(order) => {
+                    return format!(
+                        "{symbol} placed {side} {} @ {:.2} (id {})",
+                        order.qty, order.price, order.id
+                    )
+                }
+                Err((status, msg)) => return format!("{symbol} order rejected ({status}): {msg}"),
+            }
+        }
+        if !crate::risk::short_enabled() {
+            return format!("{symbol} skipped: sell signal with no position held (shorts disabled)");
+        }
+        // Flat + shorts open: fall through to the entry flow below,
+        // which sizes, calibrates and gates the short like a buy.
+    }
+    if side == "buy" {
+        // A buy on an open short covers it (in full, like any exit);
+        // it never pyramids: the cover is capped at what is owed.
+        let (net, _) = net_held(&state.pool, tenant_id, symbol).await;
+        if net < 0.0 {
+            let capped = cap_cover_qty(sized_qty(&closes, price), -net);
+            if capped <= 0.0 {
+                return format!("{symbol} skipped: buy signal with no short held");
+            }
+            let slot = chrono::Utc::now().timestamp() / scheduler_interval_secs() as i64;
+            let key = format!("sched-cover-{symbol}-{slot}");
+            match crate::orders::place_paper_order(
+                state, tenant_id, "coinbase", symbol, "buy", capped, price, Some(&key),
+            )
+            .await
+            {
+                Ok(order) => {
+                    return format!(
+                        "{symbol} placed buy {} @ {:.2} (id {})",
+                        order.qty, order.price, order.id
+                    )
+                }
+                Err((status, msg)) => return format!("{symbol} order rejected ({status}): {msg}"),
+            }
+        }
+        if net > 0.0 {
+            return format!("{symbol} skipped: already positioned long");
         }
     }
     if last_side(&state.pool, tenant_id, symbol).await.as_deref() == Some(side) {
@@ -288,6 +371,12 @@ pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         let every = scheduler_interval_secs();
         tracing::info!("scheduler on: {} every {every}s (paper only)", scheduler_symbols().join(","));
+        tracing::info!(
+            "strategy package: mode={} granularity={}s shorts={} (paper only)",
+            crate::orchestrator::strategy_mode(),
+            crate::orchestrator::live_granularity_sec(),
+            if crate::risk::short_enabled() { "on" } else { "off" },
+        );
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(every)).await;
             let summary = tick(&state).await;
