@@ -24,5 +24,9 @@ reqwest = { version = "0.13.5", features = ["json"] }
 hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
+rand = "0.8"
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-native-certs = "0.8"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"

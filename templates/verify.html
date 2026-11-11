@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Warden Trade - Email verification</title>
+  {% include "_style.html" %}
+</head>
+<body class="page">
+  <main class="main container" id="verify">
+    <section class="section auth-card" aria-label="Email verification">
+      <div class="auth-head">
+        <span class="nav-brand-mark auth-logo" aria-hidden="true"></span>
+        <div class="muted auth-brand">Warden Trade</div>
+        {% if ok %}
+        <h1>Email verified</h1>
+        <p class="muted auth-sub">Your address is confirmed. You can close this tab and sign in.</p>
+        {% else %}
+        <h1>Link invalid or expired</h1>
+        <p class="muted auth-sub">Ask for a fresh link from your account page, then try again.</p>
+        {% endif %}
+      </div>
+      {% if ok %}
+      <div class="alert alert-success" role="status">Address confirmed.</div>
+      {% else %}
+      <div class="alert alert-danger" role="alert">This link is unknown or past its 72-hour window.</div>
+      {% endif %}
+      <p><a class="btn btn-primary" href="/login">Back to sign in</a></p>
+    </section>
+  </main>
+</body>
+</html>

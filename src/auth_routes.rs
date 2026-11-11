@@ -321,6 +321,23 @@ pub async fn signup_handler(
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
     // Fresh row: nobody rotated yet, so the session starts at version 0.
     let (headers, token) = issue_session(&state, &user_id, &tenant_id, 0)?;
+    // Best-effort verification email: a silent mailer must never fail
+    // signup. Log-mode keeps the flow testable with zero credentials.
+    match issue_verification_token(&state.pool, user_id, 72).await {
+        Ok(raw) => {
+            let link = format!("{}/verify?token={raw}", public_base_url());
+            let body = format!(
+                "Welcome to Warden Trade.\n\nConfirm this address to secure your account:\n{link}\n\nThis link expires in 72 hours. If you did not sign up, ignore this message."
+            );
+            if let Err(e) = crate::mail::Mailer::from_env()
+                .send(&email, "Warden Trade: verify your email", &body)
+                .await
+            {
+                tracing::warn!("verification email failed for {email}: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("verification token failed for {email}: {e}"),
+    }
     Ok((StatusCode::CREATED, headers, Json(LoginResponse { token })))
 }
 
@@ -338,6 +355,151 @@ pub async fn signup_page_handler(
     Ok(axum::response::Html(SignupTemplate.render().unwrap_or_default()))
 }
 
+/// Public origin used in emailed links. Override per environment with
+/// `PUBLIC_BASE_URL`; the default is the production console.
+fn public_base_url() -> String {
+    std::env::var("PUBLIC_BASE_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| "https://warden.djeel.org".to_string())
+}
+
+/// 32 random bytes, URL-safe base64. The raw value goes only into the
+/// email body — never into a log, a response, or the database.
+fn new_raw_token() -> String {
+    use base64::Engine;
+    use rand::RngCore;
+    let mut buf = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut buf);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
+}
+
+/// SHA-256 hex of the raw token: the only form ever stored or compared.
+fn token_hash(raw: &str) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(raw.as_bytes());
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Replace any outstanding verification token, return the fresh raw value.
+async fn issue_verification_token(
+    pool: &sqlx::PgPool,
+    user_id: uuid::Uuid,
+    ttl_hours: i64,
+) -> Result<String, sqlx::Error> {
+    let raw = new_raw_token();
+    let hash = token_hash(&raw);
+    sqlx::query("DELETE FROM email_verification_tokens WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&*pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO email_verification_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, now() + $3::interval)",
+    )
+    .bind(user_id)
+    .bind(&hash)
+    .bind(format!("{ttl_hours} hours"))
+    .execute(&*pool)
+    .await?;
+    Ok(raw)
+}
+
+/// `GET /verify?token=…`: single-use link that stamps `email_verified_at`.
+/// Unknown and expired tokens render the same failure page: nothing about
+/// the address book leaks through this endpoint.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VerifyQuery {
+    pub token: String,
+}
+
+#[derive(askama::Template)]
+#[template(path = "verify.html")]
+pub struct VerifyTemplate {
+    pub ok: bool,
+}
+
+pub async fn verify_page_handler(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<VerifyQuery>,
+) -> axum::response::Html<String> {
+    let ok = consume_verification_token(&state.pool, &query.token).await.unwrap_or(false);
+    axum::response::Html(VerifyTemplate { ok }.render().unwrap_or_default())
+}
+
+async fn consume_verification_token(pool: &sqlx::PgPool, raw: &str) -> Result<bool, sqlx::Error> {
+    let hash = token_hash(raw);
+    let row = sqlx::query("SELECT user_id, expires_at FROM email_verification_tokens WHERE token_hash = $1")
+        .bind(&hash)
+        .fetch_optional(&*pool)
+        .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    use sqlx::Row;
+    let user_id: uuid::Uuid = row.try_get("user_id")?;
+    let expires_at: chrono::DateTime<chrono::Utc> = row.try_get("expires_at")?;
+    sqlx::query("DELETE FROM email_verification_tokens WHERE token_hash = $1")
+        .bind(&hash)
+        .execute(&*pool)
+        .await?;
+    if expires_at < chrono::Utc::now() {
+        return Ok(false);
+    }
+    sqlx::query("UPDATE users SET email_verified_at = now() WHERE id = $1")
+        .bind(user_id)
+        .execute(&*pool)
+        .await?;
+    Ok(true)
+}
+
+/// `POST /api/auth/verify/resend`: fresh link for the signed-in user.
+/// Already-verified addresses get the same `ok` without a new email.
+pub async fn resend_verification_handler(
+    State(state): State<AppState>,
+    tenant: crate::state::Tenant,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let user_id: uuid::Uuid = tenant
+        .user_id
+        .parse()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
+    let tenant_id: uuid::Uuid = tenant
+        .tenant_id
+        .parse()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
+    let row = sqlx::query("SELECT email, email_verified_at FROM users WHERE id = $1 AND tenant_id = $2")
+        .bind(user_id)
+        .bind(tenant_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+    let Some(row) = row else {
+        return Err((StatusCode::NOT_FOUND, "account not found".to_string()));
+    };
+    use sqlx::Row;
+    let email: String = row
+        .try_get("email")
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
+    let verified: Option<chrono::DateTime<chrono::Utc>> = row
+        .try_get("email_verified_at")
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
+    if verified.is_some() {
+        return Ok(Json(serde_json::json!({ "ok": true })));
+    }
+    let raw = issue_verification_token(&state.pool, user_id, 72)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "token", e))?;
+    let link = format!("{}/verify?token={raw}", public_base_url());
+    let body = format!(
+        "Confirm this address to secure your Warden Trade account:\n{link}\n\nThis link expires in 72 hours. If you did not ask for it, ignore this message."
+    );
+    crate::mail::Mailer::from_env()
+        .send(&email, "Warden Trade: verify your email", &body)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "mail", e))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 /// Account data shown on the settings page. Never a hash, never a token.
 #[derive(askama::Template)]
 #[template(path = "account.html")]
@@ -345,6 +507,7 @@ pub struct AccountTemplate {
     pub email: String,
     pub role: String,
     pub member_since: String,
+    pub email_verified: bool,
 }
 
 /// `GET /account`: settings page for the signed-in user.
@@ -361,7 +524,7 @@ pub async fn account_page_handler(
         .parse()
         .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
     let row = sqlx::query(
-        "SELECT email, role, created_at FROM users WHERE id = $1 AND tenant_id = $2",
+        "SELECT email, role, created_at, email_verified_at FROM users WHERE id = $1 AND tenant_id = $2",
     )
     .bind(user_id)
     .bind(tenant_id)
@@ -381,10 +544,14 @@ pub async fn account_page_handler(
     let created: chrono::DateTime<chrono::Utc> = row
         .try_get("created_at")
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
+    let verified: Option<chrono::DateTime<chrono::Utc>> = row
+        .try_get("email_verified_at")
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
     let page = AccountTemplate {
         email,
         role,
         member_since: created.format("%Y-%m-%d").to_string(),
+        email_verified: verified.is_some(),
     };
     Ok(axum::response::Html(
         page.render()
@@ -607,15 +774,27 @@ mod page_tests {
             email: "trader@example.com".to_string(),
             role: "member".to_string(),
             member_since: "2026-11-09".to_string(),
+            email_verified: false,
         };
         let html = page.render().expect("account renders");
         assert!(html.contains("trader@example.com"), "account must show the email");
         assert!(html.contains("member"), "account must show the role");
         assert!(html.contains("2026-11-09"), "account must show member-since");
+        assert!(html.contains("Unverified"), "account must flag unverified addresses");
+        assert!(html.contains("/api/auth/verify/resend"), "unverified account must offer a resend");
         assert!(html.contains("/api/auth/change-password"), "account must wire the password form");
         assert!(html.contains("password-eye"), "password fields must offer show/hide toggles");
         assert!(!html.contains("password_hash"), "template must never touch hashes, got {html:?}");
         assert!(!html.contains("localStorage"), "no client-side secret storage");
+        let verified_page = AccountTemplate {
+            email: "trader@example.com".to_string(),
+            role: "member".to_string(),
+            member_since: "2026-11-09".to_string(),
+            email_verified: true,
+        };
+        let verified_html = verified_page.render().expect("verified account renders");
+        assert!(verified_html.contains("Verified"), "account must flag verified addresses");
+        assert!(!verified_html.contains("id=\"verify-resend\""), "verified account must not offer a resend");
     }
 }
 
@@ -852,6 +1031,81 @@ mod account_flow_tests {
         .await
         .expect("re-signup after delete must succeed");
         assert_eq!(status, StatusCode::CREATED);
+        super::page_tests::restore_signup_env(prev);
+    }
+
+    #[tokio::test]
+    async fn email_verification_roundtrip() {
+        let _lock = super::page_tests::signup_test_lock();
+        let prev = std::env::var("SIGNUP_ENABLED").ok();
+        std::env::set_var("SIGNUP_ENABLED", "1");
+        let Some(state) = proof_state() else {
+            super::page_tests::restore_signup_env(prev);
+            return;
+        };
+        let email = format!("verify{}@example.com", chrono::Utc::now().timestamp_millis());
+
+        // Signup issues a verification token row (log-mode mailer, no SMTP).
+        let (status, _, Json(_)) = signup_handler(
+            State(state.clone()),
+            Json(SignupRequest { email: email.clone(), password: "correct-horse-10".to_string() }),
+        )
+        .await
+        .expect("signup must succeed");
+        assert_eq!(status, StatusCode::CREATED);
+        use sqlx::Row;
+        let user_id: uuid::Uuid = sqlx::query("SELECT id FROM users WHERE email = $1")
+            .bind(&email)
+            .fetch_one(&state.pool)
+            .await
+            .expect("user row")
+            .try_get("id")
+            .expect("id");
+        let pending: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM email_verification_tokens WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&state.pool)
+                .await
+                .expect("token row");
+        assert_eq!(pending, 1, "signup must issue exactly one verification token");
+
+        // Consume a token we mint ourselves: unknown raw value first.
+        let bad = verify_page_handler(
+            State(state.clone()),
+            axum::extract::Query(VerifyQuery { token: "not-a-real-token".to_string() }),
+        )
+        .await;
+        assert!(bad.0.contains("invalid or expired"), "unknown token must fail, got {:?}", bad.0);
+        let still: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT email_verified_at FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_one(&state.pool)
+                .await
+                .expect("flag");
+        assert!(still.is_none(), "unknown token must not verify");
+
+        // Known raw token: single use stamps the address, then burns.
+        let raw = super::new_raw_token();
+        let hash = super::token_hash(&raw);
+        sqlx::query(
+            "INSERT INTO email_verification_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, now() + '1 hour'::interval)",
+        )
+        .bind(user_id)
+        .bind(&hash)
+        .execute(&state.pool)
+        .await
+        .expect("seed token");
+        let good = verify_page_handler(State(state.clone()), axum::extract::Query(VerifyQuery { token: raw.clone() })).await;
+        assert!(good.0.contains("confirmed"), "valid token must verify, got {:?}", good.0);
+        let stamped: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT email_verified_at FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_one(&state.pool)
+                .await
+                .expect("flag");
+        assert!(stamped.is_some(), "valid token must stamp email_verified_at");
+        let replay = verify_page_handler(State(state.clone()), axum::extract::Query(VerifyQuery { token: raw })).await;
+        assert!(replay.0.contains("invalid or expired"), "token must be single-use, got {:?}", replay.0);
         super::page_tests::restore_signup_env(prev);
     }
 }

@@ -19,7 +19,9 @@
       </div>
       <table class="table">
         <tbody>
-          <tr><th scope="row">Email</th><td>{{ email }}</td></tr>
+          <tr><th scope="row">Email</th><td>{{ email }}
+            {% if email_verified %}<span class="pill">Verified</span>{% else %}<span class="pill">Unverified</span>{% endif %}
+          </td></tr>
           <tr><th scope="row">Role</th><td>{{ role }}</td></tr>
           <tr><th scope="row">Member since</th><td>{{ member_since }}</td></tr>
         </tbody>
@@ -63,6 +65,19 @@
         <button class="btn btn-primary" type="submit" id="password-submit">Update password</button>
       </form>
     </section>
+    {% if email_verified == false %}
+    <section class="section" aria-label="Email verification">
+      <div class="section-head">
+        <div>
+          <h2>Verify your email</h2>
+          <p>Unverified addresses cannot receive security emails. The link expires in 72 hours.</p>
+        </div>
+      </div>
+      <div id="verify-error" class="alert alert-danger" role="alert" hidden></div>
+      <div id="verify-ok" class="alert alert-success" role="status" hidden></div>
+      <button class="btn" type="button" id="verify-resend">Send verification link</button>
+    </section>
+    {% endif %}
   </div>
 </div>
 {% endblock %}
@@ -121,6 +136,31 @@
         err.hidden = false;
         err.textContent = "Update failed.";
       }
+      btn.disabled = false;
+    });
+  });
+})();
+
+// Resend button (rendered only while the address is unverified).
+(function () {
+  var btn = document.getElementById("verify-resend");
+  if (!btn) return;
+  var err = document.getElementById("verify-error");
+  var ok = document.getElementById("verify-ok");
+  btn.addEventListener("click", function () {
+    err.hidden = true;
+    ok.hidden = true;
+    btn.disabled = true;
+    fetch("/api/auth/verify/resend", { method: "POST" }).then(function (resp) {
+      if (!resp.ok) { throw new Error("Resend failed (HTTP " + resp.status + ")."); }
+      return resp.json();
+    }).then(function () {
+      ok.hidden = false;
+      ok.textContent = "Verification link sent. Check your inbox.";
+      btn.disabled = false;
+    }).catch(function (e) {
+      err.hidden = false;
+      err.textContent = e.message || "Resend failed.";
       btn.disabled = false;
     });
   });

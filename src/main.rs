@@ -21,6 +21,7 @@ mod kraken;
 mod lab;
 mod live;
 mod livetrade;
+mod mail;
 mod markets;
 mod news;
 mod orchestrator;
@@ -55,6 +56,7 @@ async fn main() {
         .route("/login", post(auth_routes::login_handler))
         .route("/signup", post(auth_routes::signup_handler))
         .route("/change-password", post(auth_routes::change_password_handler))
+        .route("/verify/resend", post(auth_routes::resend_verification_handler))
         .route("/account", axum::routing::delete(auth_routes::delete_account_handler))
         .route_layer(axum::middleware::from_fn_with_state(
             limiter,
@@ -65,6 +67,7 @@ async fn main() {
         .route("/", get(dashboard::dashboard_handler))
         .route("/login", get(auth_routes::login_page_handler))
         .route("/signup", get(auth_routes::signup_page_handler))
+        .route("/verify", get(auth_routes::verify_page_handler))
         .route("/account", get(auth_routes::account_page_handler))
         .route("/markets", get(markets::markets_page_handler))
         .route("/orders", get(orders::orders_page_handler))
