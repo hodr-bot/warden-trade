@@ -459,6 +459,58 @@ pub async fn change_password_handler(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// Incoming account-deletion body: the password re-confirms identity so a
+/// stolen session alone cannot erase the account.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeleteAccountRequest {
+    pub password: String,
+}
+
+/// `DELETE /api/auth/account`: erase the caller's own account.
+///
+/// Verifies the password first, then a single `DELETE`: verification
+/// tokens, reset tokens and backup codes cascade on the FK, and every
+/// issued JWT dies on next use because the user row (and its `pwd_ver`)
+/// is gone. Tenant-scoped trading history is the operator's own
+/// bookkeeping and is retained.
+pub async fn delete_account_handler(
+    State(state): State<AppState>,
+    tenant: crate::state::Tenant,
+    Json(req): Json<DeleteAccountRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let user_id: uuid::Uuid = tenant
+        .user_id
+        .parse()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
+    let tenant_id: uuid::Uuid = tenant
+        .tenant_id
+        .parse()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid session".to_string()))?;
+    let row = sqlx::query("SELECT password_hash FROM users WHERE id = $1 AND tenant_id = $2")
+        .bind(user_id)
+        .bind(tenant_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+    let Some(row) = row else {
+        return Err((StatusCode::NOT_FOUND, "account not found".to_string()));
+    };
+    use sqlx::Row;
+    let hash: String = row
+        .try_get("password_hash")
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "user", e))?;
+    if !crate::auth::verify_password(&hash, &req.password) {
+        return Err((StatusCode::UNAUTHORIZED, "current password is wrong".to_string()));
+    }
+    sqlx::query("DELETE FROM users WHERE id = $1 AND tenant_id = $2")
+        .bind(user_id)
+        .bind(tenant_id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, "db", e))?;
+    Ok(Json(serde_json::json!({ "deleted": true })))
+}
+
 /// Server-rendered solo-admin login page.
 ///
 /// Same-origin HTML shell; the form POSTs JSON to `/api/auth/login` and
@@ -727,6 +779,79 @@ mod account_flow_tests {
         let (mut parts, _) = req.into_parts();
         let rejected = crate::state::Tenant::from_request_parts(&mut parts, &state).await;
         assert!(rejected.is_err(), "stale token must not authenticate after rotation");
+        super::page_tests::restore_signup_env(prev);
+    }
+
+    #[tokio::test]
+    async fn delete_account_purges_and_kills_session() {
+        let _lock = super::page_tests::signup_test_lock();
+        let prev = std::env::var("SIGNUP_ENABLED").ok();
+        std::env::set_var("SIGNUP_ENABLED", "1");
+        let Some(state) = proof_state() else {
+            super::page_tests::restore_signup_env(prev);
+            return;
+        };
+        let email = format!("gone{}@example.com", chrono::Utc::now().timestamp_millis());
+
+        let (_, _, Json(created)) = signup_handler(
+            State(state.clone()),
+            Json(SignupRequest { email: email.clone(), password: "correct-horse-10".to_string() }),
+        )
+        .await
+        .expect("signup must succeed");
+        let claims = crate::auth::decode_jwt(&created.token, state.jwt_secret.as_bytes())
+            .expect("token must decode");
+        let tenant = crate::state::Tenant { tenant_id: claims.tenant_id, user_id: claims.sub };
+
+        // Wrong password: 401 and the account survives.
+        let bad = delete_account_handler(
+            State(state.clone()),
+            tenant.clone(),
+            Json(DeleteAccountRequest { password: "not-the-password-10".to_string() }),
+        )
+        .await;
+        assert!(matches!(bad, Err((StatusCode::UNAUTHORIZED, _))), "wrong password must 401, got {bad:?}");
+        let _ = login_handler(
+            State(state.clone()),
+            Json(LoginRequest { email: email.clone(), password: "correct-horse-10".to_string() }),
+        )
+        .await
+        .expect("account must survive a wrong-password delete");
+
+        // Right password: the row is gone.
+        let Json(ok) = delete_account_handler(State(state.clone()), tenant.clone(), Json(DeleteAccountRequest {
+            password: "correct-horse-10".to_string(),
+        }))
+        .await
+        .expect("delete with password must succeed");
+        assert_eq!(ok, serde_json::json!({ "deleted": true }));
+
+        // Login is dead and the old token no longer authenticates.
+        let stale = login_handler(
+            State(state.clone()),
+            Json(LoginRequest { email: email.clone(), password: "correct-horse-10".to_string() }),
+        )
+        .await;
+        assert!(matches!(stale, Err((StatusCode::UNAUTHORIZED, _))), "deleted account must not log in, got {stale:?}");
+        use axum::body::Body;
+        use axum::extract::FromRequestParts;
+        let req = axum::http::Request::builder()
+            .uri("/")
+            .header("Cookie", format!("warden_token={}", created.token))
+            .body(Body::empty())
+            .unwrap();
+        let (mut parts, _) = req.into_parts();
+        let rejected = crate::state::Tenant::from_request_parts(&mut parts, &state).await;
+        assert!(rejected.is_err(), "deleted account token must not authenticate");
+
+        // The address is free again: erasure really purged the row.
+        let (status, _, _) = signup_handler(
+            State(state.clone()),
+            Json(SignupRequest { email, password: "fresh-horse-10!!".to_string() }),
+        )
+        .await
+        .expect("re-signup after delete must succeed");
+        assert_eq!(status, StatusCode::CREATED);
         super::page_tests::restore_signup_env(prev);
     }
 }

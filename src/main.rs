@@ -55,6 +55,7 @@ async fn main() {
         .route("/login", post(auth_routes::login_handler))
         .route("/signup", post(auth_routes::signup_handler))
         .route("/change-password", post(auth_routes::change_password_handler))
+        .route("/account", axum::routing::delete(auth_routes::delete_account_handler))
         .route_layer(axum::middleware::from_fn_with_state(
             limiter,
             ratelimit::limit_auth,
