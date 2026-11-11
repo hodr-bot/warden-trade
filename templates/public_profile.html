@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Warden Trade - {% if found %}{{ display_name }}{% else %}Profile not found{% endif %}</title>
+  {% include "_style.html" %}
+</head>
+<body class="page">
+  <main class="main container" id="public-profile">
+    <section class="section auth-card" aria-label="Public paper profile">
+      <div class="auth-head">
+        <span class="nav-brand-mark auth-logo" aria-hidden="true"></span>
+        <div class="muted auth-brand">Warden Trade · paper profile</div>
+        {% if found %}
+        <h1>{{ display_name }}</h1>
+        <p class="muted auth-sub">Paper trading on Warden Trade since {{ member_since }}.</p>
+        {% else %}
+        <h1>Profile not found</h1>
+        <p class="muted auth-sub">This trader has no public page — names are opt-in and can be cleared any time.</p>
+        {% endif %}
+      </div>
+      {% if found %}
+      <table class="table">
+        <tbody>
+          <tr><th scope="row">Member since</th><td>{{ member_since }}</td></tr>
+          <tr><th scope="row">Paper trades</th><td>{{ paper_trades }}</td></tr>
+          <tr><th scope="row">Paper fees paid</th><td>${{ total_fees }}</td></tr>
+        </tbody>
+      </table>
+      <p class="muted">Workspace paper totals, read-only. No real funds, no live positions.</p>
+      {% else %}
+      <div class="alert alert-danger" role="alert">Unknown trader, or the page was taken dark.</div>
+      {% endif %}
+      <p><a class="btn btn-primary" href="/">Back to Warden Trade</a></p>
+    </section>
+  </main>
+</body>
+</html>

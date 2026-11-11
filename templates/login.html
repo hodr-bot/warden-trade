@@ -35,7 +35,22 @@
         <div id="login-ok" class="alert alert-success" role="status" hidden></div>
         <button class="btn btn-primary btn-block" type="submit" id="login-submit">Continue</button>
       </form>
+      <form id="totp-form" hidden>
+        <div class="field">
+          <label for="totp-login-code">Two-factor code</label>
+          <input class="input" id="totp-login-code" inputmode="numeric" autocomplete="one-time-code" maxlength="16" required />
+        </div>
+        <p class="muted">Enter the 6-digit code from your authenticator app — or one unused backup code.</p>
+        <button class="btn btn-primary btn-block" type="submit" id="totp-submit">Verify</button>
+      </form>
       <p class="muted auth-foot">Paper trading only · no real funds.</p>
+      <details class="auth-recover">
+        <summary>Forgot your password?</summary>
+        <p class="muted">Enter your address; if it exists, a 1-hour reset link is on its way.</p>
+        <div id="recover-error" class="alert alert-danger" role="alert" hidden></div>
+        <div id="recover-ok" class="alert alert-success" role="status" hidden></div>
+        <button class="btn" type="button" id="recover-send">Send reset link</button>
+      </details>
     </section>
   </main>
 <script>
@@ -77,6 +92,17 @@
       if (!resp.ok) { throw new Error(resp.status === 401 ? "Invalid email or password." : "Login failed (HTTP " + resp.status + ")."); }
       return resp.json();
     }).then(function (data) {
+      // 202 + totp_required: password passed, second step now.
+      if (data && data.totp_required) {
+        pendingChallenge = data.challenge || "";
+        form.hidden = true;
+        totpForm.hidden = false;
+        ok.hidden = false;
+        ok.textContent = "Password accepted. Enter your two-factor code.";
+        btn.disabled = false;
+        document.getElementById("totp-login-code").focus();
+        return;
+      }
       // Session cookie (HttpOnly) is set by the server on this response;
       // nothing to store client-side. The token stays out of JS reach.
       ok.hidden = false;
@@ -88,6 +114,57 @@
       btn.disabled = false;
     });
   });
+  // Second factor pending: stash the 5-minute challenge and reveal the
+  // code form. The challenge is a short-lived JWT, never a session — it
+  // buys exactly one call to /api/auth/totp/verify.
+  var pendingChallenge = "";
+  var totpForm = document.getElementById("totp-form");
+  var totpBtn = document.getElementById("totp-submit");
+  totpForm.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    err.hidden = true;
+    ok.hidden = true;
+    totpBtn.disabled = true;
+    fetch("/api/auth/totp/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ challenge: pendingChallenge, code: document.getElementById("totp-login-code").value })
+    }).then(function (resp) {
+      if (resp.status === 401) { throw new Error("Wrong code — try the current one."); }
+      if (!resp.ok) { throw new Error("Verification failed (HTTP " + resp.status + ")."); }
+      return resp.json();
+    }).then(function () {
+      ok.hidden = false;
+      ok.textContent = "Signed in. Redirecting…";
+      window.setTimeout(function () { window.location.href = "/"; }, 600);
+    }).catch(function (e) {
+      err.hidden = false;
+      err.textContent = e.message || "Verification failed.";
+      totpBtn.disabled = false;
+    });
+  });
+  // Password recovery: reuses the login email field, always reports ok so
+  // the address book never leaks through this button.
+  var recover = document.getElementById("recover-send");
+  if (recover) {
+    recover.addEventListener("click", function () {
+      var rerr = document.getElementById("recover-error");
+      var rok = document.getElementById("recover-ok");
+      rerr.hidden = true;
+      rok.hidden = true;
+      fetch("/api/auth/reset/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: document.getElementById("login-email").value })
+      }).then(function () {
+        rok.hidden = false;
+        rok.textContent = "If the address exists, a reset link is on its way.";
+      }).catch(function () {
+        rerr.hidden = false;
+        rerr.textContent = "Could not reach the server. Try again.";
+      });
+    });
+  }
 })();
 </script>
 </body>

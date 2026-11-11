@@ -130,7 +130,11 @@ pub struct Tenant {
 /// Rejects tokens whose embedded password version (`pv`) no longer matches
 /// the user's row: after a password rotation every previously issued token
 /// dies, including stolen ones. A closed account (row gone) rejects too.
+/// Challenge tokens (purpose `"totp"`) never authenticate as sessions.
 async fn claims_live(claims: &crate::auth::Claims, pool: &sqlx::PgPool) -> bool {
+    if !claims.purpose.is_empty() && claims.purpose != "session" {
+        return false;
+    }
     let uid = claims.sub.parse::<uuid::Uuid>();
     let tid = claims.tenant_id.parse::<uuid::Uuid>();
     let (Ok(uid), Ok(tid)) = (uid, tid) else { return false };

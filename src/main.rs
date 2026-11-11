@@ -21,6 +21,7 @@ mod kraken;
 mod lab;
 mod live;
 mod livetrade;
+mod mail;
 mod markets;
 mod news;
 mod orchestrator;
@@ -48,6 +49,15 @@ async fn main() {
         tracing::warn!("migrations not applied, running degraded: {e}");
     }
     let limiter = std::sync::Arc::new(ratelimit::RateLimiter::from_env());
+    // Public pages get their own looser bucket: profile views must never
+    // burn the auth budget that guards Argon2. Same 429 + Retry-After shape.
+    let public_limiter = std::sync::Arc::new(ratelimit::RateLimiter::new(120, 60));
+    let public_pages = Router::new()
+        .route("/u/{id}", get(auth_routes::public_profile_handler))
+        .route_layer(axum::middleware::from_fn_with_state(
+            public_limiter,
+            ratelimit::limit_auth,
+        ));
     // Auth endpoints burn an Argon2 hash per attempt: they get their own
     // per-IP sliding window so unauthenticated CPU spend stays bounded.
     // (429 + Retry-After when over budget.)
@@ -55,6 +65,15 @@ async fn main() {
         .route("/login", post(auth_routes::login_handler))
         .route("/signup", post(auth_routes::signup_handler))
         .route("/change-password", post(auth_routes::change_password_handler))
+        .route("/verify/resend", post(auth_routes::resend_verification_handler))
+        .route("/reset/request", post(auth_routes::request_reset_handler))
+        .route("/reset/confirm", post(auth_routes::confirm_reset_handler))
+        .route("/totp/setup", post(auth_routes::setup_totp_handler))
+        .route("/totp/confirm", post(auth_routes::confirm_totp_handler))
+        .route("/totp/verify", post(auth_routes::verify_totp_handler))
+        .route("/totp/disable", post(auth_routes::disable_totp_handler))
+        .route("/profile", post(auth_routes::update_profile_handler))
+        .route("/account", axum::routing::delete(auth_routes::delete_account_handler))
         .route_layer(axum::middleware::from_fn_with_state(
             limiter,
             ratelimit::limit_auth,
@@ -64,6 +83,8 @@ async fn main() {
         .route("/", get(dashboard::dashboard_handler))
         .route("/login", get(auth_routes::login_page_handler))
         .route("/signup", get(auth_routes::signup_page_handler))
+        .route("/verify", get(auth_routes::verify_page_handler))
+        .route("/reset", get(auth_routes::reset_page_handler))
         .route("/account", get(auth_routes::account_page_handler))
         .route("/markets", get(markets::markets_page_handler))
         .route("/orders", get(orders::orders_page_handler))
@@ -71,6 +92,7 @@ async fn main() {
         .route("/api/orders", get(orders::orders_handler).post(orders::create_order_handler))
         .route("/api/backtest", get(backtest::backtest_handler))
         .nest("/api/auth", auth_api)
+        .merge(public_pages)
         .route("/api/auth/logout", post(auth_routes::logout_handler))
         .route("/api/reconcile", get(reconcile::reconcile_handler))
         .route("/api/agents", get(orchestrator::agents_handler))

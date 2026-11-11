@@ -19,11 +19,39 @@
       </div>
       <table class="table">
         <tbody>
-          <tr><th scope="row">Email</th><td>{{ email }}</td></tr>
+          <tr><th scope="row">Display name</th><td>{% match display_name %}{% when Some with (n) %}{{ n }}{% when None %}Not set{% endmatch %}</td></tr>
+          <tr><th scope="row">Public page</th><td><a href="/u/{{ user_id }}">/u/{{ user_id }}</a>
+            <span class="muted">{% match display_name %}{% when Some with (_) %}live{% when None %}dark until you set a name{% endmatch %}</span></td></tr>
+          <tr><th scope="row">Email</th><td>{{ email }}
+            {% if email_verified %}<span class="pill">Verified</span>{% else %}<span class="pill">Unverified</span>{% endif %}
+          </td></tr>
           <tr><th scope="row">Role</th><td>{{ role }}</td></tr>
           <tr><th scope="row">Member since</th><td>{{ member_since }}</td></tr>
         </tbody>
       </table>
+    </section>
+
+    <section class="section" aria-label="Edit profile">
+      <div class="section-head">
+        <div>
+          <h2>Edit profile</h2>
+          <p>Display name shows on your public paper profile. Changing your email restarts verification.</p>
+        </div>
+      </div>
+      <form id="profile-form">
+        <div class="field">
+          <label for="profile-name">Display name</label>
+          <input id="profile-name" name="display_name" type="text" maxlength="40" autocomplete="nickname"
+                 value="{% match display_name %}{% when Some with (n) %}{{ n }}{% when None %}{% endmatch %}">
+        </div>
+        <div class="field">
+          <label for="profile-email">Email</label>
+          <input id="profile-email" name="email" type="email" autocomplete="email" value="{{ email }}">
+        </div>
+        <div id="profile-error" class="alert alert-danger" role="alert" hidden></div>
+        <div id="profile-ok" class="alert alert-success" role="status" hidden></div>
+        <button class="btn btn-primary" type="submit" id="profile-submit">Save profile</button>
+      </form>
     </section>
 
     <section class="section" aria-label="Change password">
@@ -62,6 +90,53 @@
         <div id="password-ok" class="alert alert-success" role="status" hidden></div>
         <button class="btn btn-primary" type="submit" id="password-submit">Update password</button>
       </form>
+    </section>
+    {% if email_verified == false %}
+    <section class="section" aria-label="Email verification">
+      <div class="section-head">
+        <div>
+          <h2>Verify your email</h2>
+          <p>Unverified addresses cannot receive security emails. The link expires in 72 hours.</p>
+        </div>
+      </div>
+      <div id="verify-error" class="alert alert-danger" role="alert" hidden></div>
+      <div id="verify-ok" class="alert alert-success" role="status" hidden></div>
+      <button class="btn" type="button" id="verify-resend">Send verification link</button>
+    </section>
+    {% endif %}
+    <section class="section" aria-label="Two-factor authentication">
+      <div class="section-head">
+        <div>
+          <h2>Two-factor authentication</h2>
+          {% if totp_enabled %}<p><span class="pill">On</span> Authenticator codes required at login.</p>
+          {% else %}<p><span class="pill">Off</span> Add a time-based one-time code as a second factor.</p>{% endif %}
+        </div>
+      </div>
+      <div id="totp-error" class="alert alert-danger" role="alert" hidden></div>
+      <div id="totp-ok" class="alert alert-success" role="status" hidden></div>
+      {% if totp_enabled %}
+      <div class="field">
+        <label for="totp-disable-password">Current password</label>
+        <input class="input" id="totp-disable-password" type="password" autocomplete="current-password" />
+      </div>
+      <button class="btn" type="button" id="totp-disable">Disable two-factor</button>
+      {% else %}
+      <button class="btn" type="button" id="totp-setup">Enable two-factor</button>
+      <div id="totp-setup-pane" hidden>
+        <p class="muted">Scan this secret into your authenticator app (or paste the link), then enter a live 6-digit code.</p>
+        <p>Secret: <code id="totp-secret"></code></p>
+        <p class="muted" id="totp-url-line">Link: <code id="totp-url"></code></p>
+        <div class="field">
+          <label for="totp-code">6-digit code</label>
+          <input class="input" id="totp-code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" />
+        </div>
+        <button class="btn btn-primary" type="button" id="totp-confirm">Confirm and enable</button>
+        <div id="totp-codes" hidden>
+          <p class="muted">Backup codes — each works once. Store them now; they are never shown again.</p>
+          <ul id="totp-codes-list"></ul>
+        </div>
+      </div>
+      {% endif %}
     </section>
   </div>
 </div>
@@ -124,6 +199,136 @@
       btn.disabled = false;
     });
   });
+})();
+
+// Resend button (rendered only while the address is unverified).
+(function () {
+  var btn = document.getElementById("verify-resend");
+  if (!btn) return;
+  var err = document.getElementById("verify-error");
+  var ok = document.getElementById("verify-ok");
+  btn.addEventListener("click", function () {
+    err.hidden = true;
+    ok.hidden = true;
+    btn.disabled = true;
+    fetch("/api/auth/verify/resend", { method: "POST" }).then(function (resp) {
+      if (!resp.ok) { throw new Error("Resend failed (HTTP " + resp.status + ")."); }
+      return resp.json();
+    }).then(function () {
+      ok.hidden = false;
+      ok.textContent = "Verification link sent. Check your inbox.";
+      btn.disabled = false;
+    }).catch(function (e) {
+      err.hidden = false;
+      err.textContent = e.message || "Resend failed.";
+      btn.disabled = false;
+    });
+  });
+})();
+// Profile edit: display name (empty clears) + email (change restarts
+// verification; the badge updates on next page load).
+(function () {
+  var form = document.getElementById("profile-form");
+  if (!form) { return; }
+  var nameInput = document.getElementById("profile-name");
+  var emailInput = document.getElementById("profile-email");
+  var err = document.getElementById("profile-error");
+  var ok = document.getElementById("profile-ok");
+  var btn = document.getElementById("profile-submit");
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    err.hidden = true;
+    ok.hidden = true;
+    btn.disabled = true;
+    fetch("/api/auth/profile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        display_name: nameInput ? nameInput.value : "",
+        email: emailInput ? emailInput.value : ""
+      })
+    }).then(function (resp) {
+      if (!resp.ok) { return resp.text().then(function (t) { throw new Error(t || "Save failed."); }); }
+      return resp.json();
+    }).then(function (data) {
+      ok.hidden = false;
+      ok.textContent = (data && data.email_changed)
+        ? "Saved. New address — check your inbox to verify it."
+        : "Profile saved.";
+      btn.disabled = false;
+    }).catch(function (e) {
+      err.hidden = false;
+      err.textContent = e.message || "Save failed.";
+      btn.disabled = false;
+    });
+  });
+})();
+
+// Two-factor setup / confirm / disable. Guards on element presence: the
+// setup pane only exists while 2FA is off, the disable button only while on.
+(function () {
+  var err = document.getElementById("totp-error");
+  var ok = document.getElementById("totp-ok");
+  function fail(msg) { err.hidden = false; err.textContent = msg; ok.hidden = true; }
+  function done(msg) { ok.hidden = false; ok.textContent = msg; err.hidden = true; }
+  var setupBtn = document.getElementById("totp-setup");
+  if (setupBtn) {
+    setupBtn.addEventListener("click", function () {
+      err.hidden = true; ok.hidden = true; setupBtn.disabled = true;
+      fetch("/api/auth/totp/setup", { method: "POST" }).then(function (resp) {
+        if (!resp.ok) { throw new Error("Setup failed (HTTP " + resp.status + ")."); }
+        return resp.json();
+      }).then(function (data) {
+        document.getElementById("totp-secret").textContent = data.secret || "";
+        document.getElementById("totp-url").textContent = data.otpauth_url || "";
+        document.getElementById("totp-setup-pane").hidden = false;
+        setupBtn.disabled = false;
+      }).catch(function (e) { fail(e.message || "Setup failed."); setupBtn.disabled = false; });
+    });
+    document.getElementById("totp-confirm").addEventListener("click", function () {
+      err.hidden = true; ok.hidden = true;
+      var code = document.getElementById("totp-code").value;
+      fetch("/api/auth/totp/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: code })
+      }).then(function (resp) {
+        if (resp.status === 401) { throw new Error("Wrong code — try the current one."); }
+        if (!resp.ok) { throw new Error("Confirm failed (HTTP " + resp.status + ")."); }
+        return resp.json();
+      }).then(function (data) {
+        var list = document.getElementById("totp-codes-list");
+        list.textContent = "";
+        (data.backup_codes || []).forEach(function (c) {
+          var li = document.createElement("li");
+          li.innerHTML = "<code></code>";
+          li.firstChild.textContent = c;
+          list.appendChild(li);
+        });
+        document.getElementById("totp-codes").hidden = false;
+        done("Two-factor is on. Reload to see the updated status.");
+      }).catch(function (e) { fail(e.message || "Confirm failed."); });
+    });
+  }
+  var disableBtn = document.getElementById("totp-disable");
+  if (disableBtn) {
+    disableBtn.addEventListener("click", function () {
+      err.hidden = true; ok.hidden = true; disableBtn.disabled = true;
+      var pw = document.getElementById("totp-disable-password").value;
+      fetch("/api/auth/totp/disable", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: pw })
+      }).then(function (resp) {
+        if (resp.status === 401) { throw new Error("Wrong password."); }
+        if (!resp.ok) { throw new Error("Disable failed (HTTP " + resp.status + ")."); }
+        return resp.json();
+      }).then(function () {
+        done("Two-factor is off. Reload to see the updated status.");
+        disableBtn.disabled = false;
+      }).catch(function (e) { fail(e.message || "Disable failed."); disableBtn.disabled = false; });
+    });
+  }
 })();
 </script>
 {% endblock %}
