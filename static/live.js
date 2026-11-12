@@ -181,21 +181,111 @@
     if (url && url.indexOf("/login") !== -1) window.location.href = "/login";
   });
 
-  // Timeline dots: tap (or click) a dot to pin its value in the readout
+  // Timeline: tap (or click) a dot to pin its value in the readout
   // line under the chart. Delegated on document so HTMX swaps keep working.
   document.addEventListener("click", function (ev) {
     var dot = ev.target && ev.target.closest ? ev.target.closest(".eq-dot") : null;
     if (!dot) return;
     var readout = document.getElementById("eq-readout");
     if (!readout) return;
+    readout.textContent = eqDotLabel(dot);
+  });
+
+  // Timeline hover: a floating card follows the cursor over the curve and
+  // shows the nearest trade point (date, period PnL, trade count) — a real
+  // timeline feel on desktop, while touch keeps tap-to-pin. Delegated on
+  // document so HTMX swaps keep working; all strings via textContent.
+  function eqDotLabel(dot) {
     var t = dot.getAttribute("data-t");
     var v = dot.getAttribute("data-v");
-    if (t === null || v === null) return;
+    if (t === null || v === null) return "";
     var d = new Date(parseInt(t, 10) * 1000);
     var when = isNaN(d.getTime()) ? ("t=" + t) : d.toISOString().slice(5, 16).replace("T", " ") + " UTC";
     var num = parseFloat(v);
-    readout.textContent = when + " · " + (isNaN(num) ? v : (num >= 0 ? "+" : "") + num.toFixed(2) + " $");
+    var val = isNaN(num) ? v : (num >= 0 ? "+" : "") + num.toFixed(2) + " $";
+    var tag;
+    if (dot.getAttribute("data-live") === "1") {
+      tag = "live";
+    } else {
+      var n = dot.getAttribute("data-n");
+      tag = (n === null || n === "") ? "" : "trade #" + n;
+    }
+    return when + " · " + val + (tag === "" ? "" : " · " + tag);
+  }
+
+  function eqNearestDot(chart, clientX) {
+    var svg = chart.querySelector("svg");
+    if (!svg) return null;
+    var rect = svg.getBoundingClientRect();
+    if (rect.width <= 0) return null;
+    var viewX = ((clientX - rect.left) / rect.width) * 600.0;
+    var best = null;
+    var bestDx = Infinity;
+    var dots = chart.querySelectorAll(".eq-dot");
+    for (var i = 0; i < dots.length; i++) {
+      var cx = parseFloat(dots[i].getAttribute("cx"));
+      if (isNaN(cx)) continue;
+      var dx = Math.abs(cx - viewX);
+      if (dx < bestDx) {
+        bestDx = dx;
+        best = dots[i];
+      }
+    }
+    return best;
+  }
+
+  function eqTip(chart) {
+    var tip = chart.querySelector(".eq-tip");
+    if (tip) return tip;
+    tip = document.createElement("div");
+    tip.className = "eq-tip";
+    tip.setAttribute("aria-hidden", "true");
+    var when = document.createElement("span");
+    when.className = "eq-tip-when";
+    var val = document.createElement("span");
+    val.className = "eq-tip-val";
+    tip.appendChild(when);
+    tip.appendChild(val);
+    chart.appendChild(tip);
+    return tip;
+  }
+
+  document.addEventListener("mousemove", function (ev) {
+    var svg = ev.target && ev.target.closest ? ev.target.closest(".timeline-chart svg") : null;
+    var chart = ev.target && ev.target.closest ? ev.target.closest(".timeline-chart") : null;
+    if (!svg || !chart) return;
+    var dot = eqNearestDot(chart, ev.clientX);
+    if (!dot) return;
+    var label = eqDotLabel(dot);
+    if (!label) return;
+    var tip = eqTip(chart);
+    var when = tip.querySelector(".eq-tip-when");
+    var val = tip.querySelector(".eq-tip-val");
+    var parts = label.split(" · ");
+    when.textContent = parts[0] + (parts.length > 2 ? " · " + parts[2] : "");
+    val.textContent = parts.length > 1 ? parts[1] : "";
+    var num = parseFloat(dot.getAttribute("data-v"));
+    val.classList.toggle("up", !isNaN(num) && num >= 0);
+    val.classList.toggle("down", !isNaN(num) && num < 0);
+    tip.classList.add("on");
+    var rect = chart.getBoundingClientRect();
+    var x = ev.clientX - rect.left + 14;
+    var y = ev.clientY - rect.top - 10;
+    var maxX = rect.width - tip.offsetWidth - 8;
+    if (maxX > 8 && x > maxX) x = maxX;
+    if (x < 8) x = 8;
+    if (y < 4) y = 4;
+    tip.style.left = x + "px";
+    tip.style.top = y + "px";
   });
+
+  document.addEventListener("mouseleave", function (ev) {
+    if (!ev.target || !ev.target.closest) return;
+    var chart = ev.target.closest(".timeline-chart");
+    if (!chart) return;
+    var tip = chart.querySelector(".eq-tip.on");
+    if (tip) tip.classList.remove("on");
+  }, true);
 
   // Strategy lab (dashboard #lab section): delegated submit + re-render,
   // so the 30s HTMX dashboard refresh never kills it. All cells are built

@@ -131,12 +131,12 @@
       <div class="timeline">
         <div class="timeline-head">
           <span class="timeline-value {{ period_class }}">{{ period_realized }}</span>
-          <span class="muted">{{ period_trades }} closing trades</span>
+          <span class="muted">{{ period_hint }}</span>
         </div>
         <div class="timeline-chart {{ period_class }}">{{ equity_svg|safe }}</div>
-        <p class="muted eq-readout" id="eq-readout" aria-live="polite">Hover or tap a dot for its value.</p>
-        {% if period_trades == 0 %}
-        <p class="muted">No closing trades in this period yet.</p>
+        <p class="muted eq-readout" id="eq-readout" aria-live="polite">Hover the curve or tap a dot for its value.</p>
+        {% if period_trades == 0 && !period_live %}
+        <p class="muted">No closing trades in this period and no open position.</p>
         {% endif %}
       </div>
     </section>

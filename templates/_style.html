@@ -1054,6 +1054,10 @@ table.table {
   color: var(--danger-text);
 }
 
+.timeline-chart {
+  position: relative;
+}
+
 .timeline-chart svg {
   display: block;
   width: 100%;
@@ -1089,6 +1093,12 @@ table.table {
   stroke-width: 10;
 }
 
+/* Live open-value end dot: ringed so it reads as "now", not a close. */
+.timeline-chart .eq-live {
+  stroke: var(--surface);
+  stroke-width: 2;
+}
+
 .eq-readout {
   margin-top: var(--space-2);
   font-size: var(--fs-sm);
@@ -1099,6 +1109,40 @@ table.table {
   fill: var(--muted);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
+}
+
+/* Floating hover card that follows the cursor over the curve. Built and
+   filled by live.js with textContent only (never innerHTML). */
+.eq-tip {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  display: none;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.eq-tip.on {
+  display: block;
+}
+
+.eq-tip .eq-tip-when {
+  color: var(--muted);
+  margin-right: 0.5rem;
+}
+
+.eq-tip .eq-tip-val.up {
+  color: var(--success);
+}
+
+.eq-tip .eq-tip-val.down {
+  color: var(--danger-text);
 }
 .btn {
   display: inline-flex;
