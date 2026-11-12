@@ -107,7 +107,12 @@ fn fmt_point_ts(t: i64) -> String {
 /// Inline SVG step-line for the curve. Pure numbers in, markup out: stroke
 /// follows the period sign via `currentColor` (the wrapper carries
 /// `up`/`down`). Empty periods render a flat zero line plus a note.
-pub fn equity_svg(points: &[EquityPoint], since_ts: i64, now_ts: i64) -> String {
+///
+/// When `live` is set, the last point is the live open value (realized +
+/// unrealized at the render marks), drawn as a distinct `eq-live` dot
+/// tagged `data-live="1"` — so an hour or day with no closes yet still
+/// shows where the open book stands instead of a flat zero.
+pub fn equity_svg(points: &[EquityPoint], since_ts: i64, now_ts: i64, live: bool) -> String {
     const W: f64 = 600.0;
     const H: f64 = 180.0;
     const PAD_L: f64 = 8.0;
@@ -152,15 +157,22 @@ pub fn equity_svg(points: &[EquityPoint], since_ts: i64, now_ts: i64) -> String 
         String::new()
     };
     let end_dot = match points.last() {
-        Some(last) => format!(
-            "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"3.5\" class=\"eq-dot\" data-t=\"{}\" data-v=\"{:.2}\"><title>{} · {:+.2}</title></circle>",
-            x(last.t),
-            y(last.v),
-            last.t,
-            last.v,
-            fmt_point_ts(last.t),
-            last.v
-        ),
+        Some(last) => {
+            let cls = if live { "eq-dot eq-live" } else { "eq-dot" };
+            let live_attr = if live { " data-live=\"1\"" } else { "" };
+            let prefix = if live { "live " } else { "" };
+            format!(
+                "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"3.5\" class=\"{cls}\" data-t=\"{}\" data-v=\"{:.2}\" data-n=\"{}\"{live_attr}><title>{}{} · {:+.2}</title></circle>",
+                x(last.t),
+                y(last.v),
+                last.t,
+                last.v,
+                last.trades,
+                prefix,
+                fmt_point_ts(last.t),
+                last.v
+            )
+        }
         None => String::new(),
     };
     // Trade dots (decimated to ~24 max): native hover tooltips plus a
@@ -172,11 +184,12 @@ pub fn equity_svg(points: &[EquityPoint], since_ts: i64, now_ts: i64) -> String 
     while i + 1 < points.len() {
         let p = &points[i];
         dots.push_str(&format!(
-            "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"4.5\" class=\"eq-dot eq-trade\" data-t=\"{}\" data-v=\"{:.2}\"><title>{} · {:+.2}</title></circle>",
+            "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"4.5\" class=\"eq-dot eq-trade\" data-t=\"{}\" data-v=\"{:.2}\" data-n=\"{}\"><title>{} · {:+.2}</title></circle>",
             x(p.t),
             y(p.v),
             p.t,
             p.v,
+            p.trades,
             fmt_point_ts(p.t),
             p.v
         ));
@@ -206,14 +219,24 @@ mod tests {
         let pts: Vec<EquityPoint> = (0..50)
             .map(|i| EquityPoint { t: 1000 + i * 60, v: i as f64 * 0.1, trades: i as u32 + 1 })
             .collect();
-        let svg = equity_svg(&pts, 900, 5000);
+        let svg = equity_svg(&pts, 900, 5000, false);
         let circles = svg.match_indices("<circle").count();
         assert!(circles <= 26, "decimated, got {circles}");
         assert!(circles >= 2, "trade dots plus end dot");
         // Every dot carries a native tooltip and machine-readable data.
         assert_eq!(svg.match_indices("<title>").count(), circles);
         assert!(svg.contains("data-t=\"1000\""));
+        assert!(svg.contains("data-n=\"1\""));
         assert!(svg.contains("UTC"));
+    }
+
+    #[test]
+    fn live_end_dot_is_tagged() {
+        let pts = vec![EquityPoint { t: 1100, v: 10.0, trades: 1 }];
+        let svg = equity_svg(&pts, 900, 1200, true);
+        assert!(svg.contains("eq-live"));
+        assert!(svg.contains("data-live=\"1\""));
+        assert!(svg.contains("live "));
     }
 
     #[test]
@@ -284,14 +307,14 @@ mod tests {
             EquityPoint { t: 1100, v: 10.0, trades: 1 },
             EquityPoint { t: 1200, v: -5.0, trades: 2 },
         ];
-        let svg = equity_svg(&pts, 1000, 1300);
+        let svg = equity_svg(&pts, 1000, 1300, false);
         assert!(svg.contains("<svg") && svg.contains("<path"));
         assert!(svg.contains("+10.00") && svg.contains("-5.00"));
     }
 
     #[test]
     fn svg_empty_period_is_flat_zero() {
-        let svg = equity_svg(&[], 1000, 2000);
+        let svg = equity_svg(&[], 1000, 2000, false);
         assert!(svg.contains("<svg") && svg.contains("<path"));
         assert!(!svg.contains("<circle"), "no end dot without trades");
     }
@@ -350,6 +373,6 @@ mod tests {
         assert_eq!(trades, 2);
         assert!((period - 30.0).abs() < 1e-9, "got {period}");
         assert_eq!(pts.len(), 2);
-        assert!(equity_svg(&pts, 0, chrono::Utc::now().timestamp()).contains("+50.00"));
+        assert!(equity_svg(&pts, 0, chrono::Utc::now().timestamp(), false).contains("+50.00"));
     }
 }

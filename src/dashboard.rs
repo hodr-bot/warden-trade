@@ -41,8 +41,15 @@ pub struct DashboardTemplate {
     pub equity_svg: String,
     /// `up`/`down`/`""` for the period number.
     pub period_class: &'static str,
-    /// Formatted period realized PnL (`$+0.42`).
+    /// Formatted period headline (`$+0.42`): realized + live open value
+    /// when the book is open, realized only when flat.
     pub period_realized: String,
+    /// Live open value included in the headline (`true` when the curve
+    /// ends on a live point rather than the last close).
+    pub period_live: bool,
+    /// One-line breakdown under the headline
+    /// (`3 closing trades · realized … + live open …`).
+    pub period_hint: String,
     /// Closing sells inside the period.
     pub period_trades: u32,
     /// Watch-only real wallet: false until `WALLET_WATCH_ADDRESS` holds a
@@ -335,12 +342,14 @@ pub async fn dashboard_handler(
             .push((side.clone(), *qty, *price));
         timed.push((symbol.clone(), side.clone(), *qty, *price, *ts));
     }
-    // Timeline: period curve rebased at the active tab start.
+    // Timeline: period curve rebased at the active tab start. The SVG is
+    // rendered after the live marks below, so an open book can append a
+    // distinct live point (hour/day stop looking flat when nothing
+    // closed yet).
     let now_ts = chrono::Utc::now().timestamp();
     let range = crate::equity::normalize_range(query.range.as_deref());
     let since_ts = crate::equity::range_start(range, now_ts);
-    let (eq_points, eq_period, eq_trades) = crate::equity::equity_curve(&timed, since_ts);
-    let eq_svg = crate::equity::equity_svg(&eq_points, since_ts, now_ts);
+    let (mut eq_points, eq_period, eq_trades) = crate::equity::equity_curve(&timed, since_ts);
     // Watch-only real wallet (public address, read-only, best effort).
     // J3: this tenant's address only — never the process env, never
     // another tenant's. Empty for tenants that configured nothing.
@@ -412,6 +421,29 @@ pub async fn dashboard_handler(
         }
     }
     let (realized, closed, wins, unrealized, _open_value) = value_positions(&by_symbol, &marks);
+    // Live timeline point: when the book is open and marked, the curve
+    // ends at period realized + live unrealized instead of flatlining at
+    // the last close (or at zero when nothing closed yet this period).
+    let eq_live = unrealized != 0.0;
+    let eq_headline = if eq_live {
+        eq_period + unrealized
+    } else {
+        eq_period
+    };
+    if eq_live {
+        eq_points.push(crate::equity::EquityPoint { t: now_ts, v: eq_headline, trades: eq_trades });
+    }
+    let eq_svg = crate::equity::equity_svg(&eq_points, since_ts, now_ts, eq_live);
+    let period_hint = if eq_live {
+        format!(
+            "{} closing trades · realized {} + live open {}",
+            eq_trades,
+            fmt_usd(eq_period),
+            fmt_usd(unrealized)
+        )
+    } else {
+        format!("{} closing trades · realized only, no open position", eq_trades)
+    };
     let signals: Vec<String> = sqlx::query(
         "SELECT agent, action, symbol FROM agent_decisions WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 8",
     )
@@ -463,8 +495,10 @@ pub async fn dashboard_handler(
         generated_at: short_now(),
         range: range.to_string(),
         equity_svg: eq_svg,
-        period_class: delta_class(eq_period),
-        period_realized: fmt_usd(eq_period),
+        period_class: delta_class(eq_headline),
+        period_realized: fmt_usd(eq_headline),
+        period_live: eq_live,
+        period_hint,
         period_trades: eq_trades,
         wallet_configured,
         wallet_label,
@@ -590,6 +624,8 @@ mod tests {
             equity_svg: String::new(),
             period_class: "",
             period_realized: "$0.00".to_string(),
+            period_live: false,
+            period_hint: "0 closing trades · realized only, no open position".to_string(),
             period_trades: 0,
             wallet_configured: false,
             wallet_label: "not configured".to_string(),
