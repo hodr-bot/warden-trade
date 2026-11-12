@@ -162,7 +162,7 @@ pub fn equity_svg(points: &[EquityPoint], since_ts: i64, now_ts: i64, live: bool
             let live_attr = if live { " data-live=\"1\"" } else { "" };
             let prefix = if live { "live " } else { "" };
             format!(
-                "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"3.5\" class=\"{cls}\" data-t=\"{}\" data-v=\"{:.2}\" data-n=\"{}\"{live_attr}><title>{}{} · {:+.2}</title></circle>",
+                "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"2.5\" class=\"{cls}\" data-t=\"{}\" data-v=\"{:.2}\" data-n=\"{}\"{live_attr}><title>{}{} · {:+.2}</title></circle>",
                 x(last.t),
                 y(last.v),
                 last.t,
@@ -184,7 +184,7 @@ pub fn equity_svg(points: &[EquityPoint], since_ts: i64, now_ts: i64, live: bool
     while i + 1 < points.len() {
         let p = &points[i];
         dots.push_str(&format!(
-            "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"4.5\" class=\"eq-dot eq-trade\" data-t=\"{}\" data-v=\"{:.2}\" data-n=\"{}\"><title>{} · {:+.2}</title></circle>",
+            "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"3\" class=\"eq-dot eq-trade\" data-t=\"{}\" data-v=\"{:.2}\" data-n=\"{}\"><title>{} · {:+.2}</title></circle>",
             x(p.t),
             y(p.v),
             p.t,
