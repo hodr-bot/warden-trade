@@ -1,4 +1,4 @@
-//! Kraken read-only public feed client (paper trading only).
+//! Kraken read-only client (paper trading only).
 //!
 //! Public ticker endpoint (no auth, no secrets):
 //! `GET {base_url}/0/public/Ticker?pair={pair}`, e.g.
@@ -9,9 +9,14 @@
 //! {"error":[],"result":{"XXBTZUSD":{"a":["1","2"],"b":["1","2"],"c":["64234.1","0.5"]}}}
 //! ```
 //!
+//! Plus an opt-in private `Balance` readout (`KRAKEN_API_KEY` /
+//! `KRAKEN_API_SECRET` from the environment only, never committed).
+//! Signing only — `AddOrder` is NOT wired: nothing here can trade
+//! real funds.
+//!
 //! No external network calls in unit tests (one test hits the
 //! unreachable loopback `http://127.0.0.1:9`, which fails locally
-//! without internet). No secrets. Read-only public feed only.
+//! without internet). No secrets in code.
 
 use std::collections::HashMap;
 use std::time::Duration;
